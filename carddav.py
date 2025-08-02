@@ -5,6 +5,8 @@ from requests.auth import HTTPBasicAuth
 
 ICLOUD_USER = os.environ.get("APPLE_ID")
 ICLOUD_PASS = os.environ.get("APPLE_APP_PASSWORD")
+ICLOUD_ID = os.environ.get("APPLE_CONTACTS_ID")  # Ex: 275963685
+ICLOUD_HOST = os.environ.get("APPLE_CONTACTS_HOST", "p42-contacts.icloud.com")
 
 HEADERS = {
     "Depth": "1",
@@ -12,36 +14,23 @@ HEADERS = {
 }
 
 def get_contacts_raw():
-    url_base = "https://contacts.icloud.com"
-    principal_url = f"{url_base}/.well-known/carddav"
+    base_url = f"https://{ICLOUD_HOST}/{ICLOUD_ID}/carddavhome/"
 
-    try:
-        r = requests.request("PROPFIND", principal_url, headers=HEADERS, auth=HTTPBasicAuth(ICLOUD_USER, ICLOUD_PASS))
-        if r.status_code != 207:
-            return {"erro": f"Erro no PROPFIND", "status": r.status_code, "body": r.text}
-
-        hrefs = re.findall(r"<href>(.*?)</href>", r.text)
-        addressbook_url = next((h for h in hrefs if "/carddavhome/" in h or "/addressbooks/" in h), None)
-        if not addressbook_url:
-            return {"erro": "Não encontrou a URL do addressbook", "respostas": hrefs}
-
-        report_body = """<?xml version="1.0" encoding="UTF-8" ?>
-<C:addressbook-query xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:carddav">
+    report_body = """<?xml version=\"1.0\" encoding=\"UTF-8\" ?>
+<C:addressbook-query xmlns:D=\"DAV:\" xmlns:C=\"urn:ietf:params:xml:ns:carddav\">
   <D:prop>
     <D:getetag/>
     <C:address-data/>
   </D:prop>
 </C:addressbook-query>"""
 
-        full_url = url_base + addressbook_url
-        r = requests.request("REPORT", full_url, data=report_body, headers=HEADERS, auth=HTTPBasicAuth(ICLOUD_USER, ICLOUD_PASS))
+    try:
+        r = requests.request("REPORT", base_url, data=report_body, headers=HEADERS, auth=HTTPBasicAuth(ICLOUD_USER, ICLOUD_PASS))
         if r.status_code != 207:
             return {"erro": "Erro no REPORT", "status": r.status_code, "body": r.text}
-
         return {"vcard": r.text}
     except Exception as e:
         return {"erro": f"Exceção inesperada: {e}"}
-
 
 def parse_vcards(vcards_raw: str):
     contatos = []
