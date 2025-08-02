@@ -1,3 +1,8 @@
+import requests
+from requests.auth import HTTPBasicAuth
+import os
+import xml.etree.ElementTree as ET
+
 def get_contacts():
     url = "https://contacts.icloud.com/"
     auth = HTTPBasicAuth(os.getenv("APPLE_ID"), os.getenv("APPLE_APP_PASSWORD"))
@@ -21,7 +26,7 @@ def get_contacts():
     print("DEBUG BODY:", response.text[:1000])  # Mostra só os primeiros 1000 caracteres
 
     if response.status_code != 207:
-        return [f"Erro {response.status_code}: {response.text}"]
+        raise Exception(f"Erro {response.status_code}: {response.text}")
 
     tree = ET.fromstring(response.text)
     names = [elem.text for elem in tree.iter() if elem.tag.endswith("displayname")]
