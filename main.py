@@ -1,17 +1,21 @@
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request, Query, HTTPException
 from fastapi.responses import JSONResponse
-from carddav import get_contacts
+from carddav import get_contacts_raw, parse_vcards
 import os
 
 app = FastAPI()
-API_TOKEN = os.getenv("API_TOKEN")
+API_TOKEN = os.getenv("API_TOKEN", "mellro_super_token_123")
 
-@app.get("/contatos")
-async def contatos(request: Request):
+@app.get("/contato")
+async def buscar_contato_por_nome(request: Request, nome: str = Query(..., description="Nome parcial ou completo")):
     auth_header = request.headers.get("Authorization")
-
     if not auth_header or auth_header != f"Bearer {API_TOKEN}":
         raise HTTPException(status_code=401, detail="Unauthorized")
 
-    contatos = get_contacts()
-    return JSONResponse(content={"contatos": contatos})
+    try:
+        raw = get_contacts_raw()
+        contatos = parse_vcards(raw)
+        resultados = [c for c in contatos if nome.lower() in c.get("nome", "").lower()]
+        return JSONResponse(content={"contatos": resultados or []})
+    except Exception as e:
+        return JSONResponse(content={"erro": f"Erro ao buscar contato por nome: {str(e)}"})
