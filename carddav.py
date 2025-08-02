@@ -1,76 +1,66 @@
-import os
 import requests
-from requests.auth import HTTPBasicAuth
 import re
+from xml.etree import ElementTree as ET
 
-def parse_vcard(vcard_text):
-    contato = {}
+ICLOUD_USERNAME = "seu_usuario@icloud.com"
+ICLOUD_PASSWORD = "sua_senha_do_app"
+ICLOUD_URL = "https://contacts.icloud.com"
 
-    # Nome completo
-    fn_match = re.search(r'FN:(.+)', vcard_text)
-    if fn_match:
-        contato["nome"] = fn_match.group(1).strip()
-
-    # Telefone
-    tel_match = re.search(r'TEL[^:]*:(.+)', vcard_text)
-    if tel_match:
-        contato["telefone"] = tel_match.group(1).strip()
-
-    # Email
-    email_match = re.search(r'EMAIL[^:]*:(.+)', vcard_text)
-    if email_match:
-        contato["email"] = email_match.group(1).strip()
-
-    # Empresa (ORG)
-    org_match = re.search(r'ORG:(.+)', vcard_text)
-    if org_match:
-        contato["empresa"] = org_match.group(1).strip().replace(";", "")
-
-    # Cargo (TITLE)
-    title_match = re.search(r'TITLE:(.+)', vcard_text)
-    if title_match:
-        contato["cargo"] = title_match.group(1).strip()
-
-    # LinkedIn (X-SOCIALPROFILE)
-    linkedin_match = re.search(r'X-SOCIALPROFILE[^:]*linkedin.*:(https?://[^\r\n]+)', vcard_text)
-    if linkedin_match:
-        contato["linkedin"] = linkedin_match.group(1).strip()
-
-    return contato
+HEADERS = {
+    "Depth": "1",
+    "Content-Type": "application/xml; charset=UTF-8"
+}
 
 def get_contacts():
-    try:
-        APPLE_ID = os.getenv("APPLE_ID")
-        APPLE_APP_PASSWORD = os.getenv("APPLE_APP_PASSWORD")
-        auth = HTTPBasicAuth(APPLE_ID, APPLE_APP_PASSWORD)
+    url = f"{ICLOUD_URL}/275963685/carddavhome/card/"
 
-        base_url = "https://p42-contacts.icloud.com"
-        addressbook_path = "/275963685/carddavhome/card/"
-        url = f"{base_url}{addressbook_path}"
+    body = '''<?xml version="1.0" encoding="UTF-8"?>
+<card:addressbook-query xmlns:d="DAV:" xmlns:card="urn:ietf:params:xml:ns:carddav">
+  <d:prop>
+    <d:getetag />
+    <card:address-data />
+  </d:prop>
+</card:addressbook-query>'''
 
-        headers = {
-            "Depth": "1",
-            "Content-Type": "application/xml; charset=utf-8"
-        }
+    response = requests.request(
+        "REPORT",
+        url,
+        headers=HEADERS,
+        data=body,
+        auth=(ICLOUD_USERNAME, ICLOUD_PASSWORD)
+    )
 
-        body = """<?xml version="1.0" encoding="UTF-8"?>
-        <card:addressbook-query xmlns:card="urn:ietf:params:xml:ns:carddav"
-                                xmlns:d="DAV:">
-          <d:prop>
-            <d:getetag/>
-            <card:address-data/>
-          </d:prop>
-        </card:addressbook-query>"""
+    if response.status_code != 207:
+        raise Exception(f"Erro no REPORT: {response.status_code}", response.text)
 
-        response = requests.request("REPORT", url, headers=headers, data=body, auth=auth)
+    return parse_vcards(response.text)
 
-        if response.status_code != 207:
-            return [{"erro": "Erro no REPORT", "status": response.status_code, "body": response.text}]
+def parse_vcards(multistatus_xml):
+    ns = {
+        'd': 'DAV:',
+        'card': 'urn:ietf:params:xml:ns:carddav'
+    }
+    contatos = []
+    root = ET.fromstring(multistatus_xml)
+    for resp in root.findall('d:response', ns):
+        vcard_data = resp.find('.//card:address-data', ns)
+        if vcard_data is not None and vcard_data.text:
+            vcard_text = vcard_data.text
+            contato = {
+                "nome": _extrair_campo(vcard_text, "FN"),
+                "email": _extrair_campo(vcard_text, "EMAIL"),
+                "telefone": _extrair_campo(vcard_text, "TEL"),
+                "empresa": _extrair_campo(vcard_text, "ORG"),
+                "cargo": _extrair_campo(vcard_text, "TITLE"),
+                "linkedin": _extrair_linkedin(vcard_text),
+            }
+            contatos.append(contato)
+    return contatos
 
-        vcards = re.findall(r'BEGIN:VCARD(.*?)END:VCARD', response.text, re.DOTALL)
-        contatos = [parse_vcard("BEGIN:VCARD" + v + "END:VCARD") for v in vcards]
-        contatos = [c for c in contatos if c]  # remove vazios
-        return contatos if contatos else [{"erro": "Nenhum contato válido encontrado"}]
+def _extrair_campo(vcard, campo):
+    match = re.search(f"{campo}.*:(.+)", vcard)
+    return match.group(1).strip() if match else None
 
-    except Exception as e:
-        return [{"erro": f"Exceção inesperada: {str(e)}"}]
+def _extrair_linkedin(vcard):
+    match = re.search(r"X-SOCIALPROFILE.*linkedin.*:(https://[^\n\r]+)", vcard)
+    return match.group(1).strip() if match else None

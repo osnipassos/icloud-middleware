@@ -1,6 +1,6 @@
 from fastapi import FastAPI, Request, Query, HTTPException
 from fastapi.responses import JSONResponse
-from carddav import get_contacts_raw, parse_vcards
+from carddav import get_contacts
 import os
 
 app = FastAPI()
@@ -13,8 +13,7 @@ async def buscar_contato_por_nome(request: Request, nome: str = Query(..., descr
         raise HTTPException(status_code=401, detail="Unauthorized")
 
     try:
-        raw = get_contacts_raw()
-        contatos = parse_vcards(raw)
+        contatos = get_contacts()
         resultados = [c for c in contatos if nome.lower() in c.get("nome", "").lower()]
         return JSONResponse(content={"contatos": resultados or []})
     except Exception as e:
