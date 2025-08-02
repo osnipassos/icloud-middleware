@@ -48,16 +48,19 @@ def get_contacts():
 
         root2 = ET.fromstring(response2.text)
         responses = root2.findall(".//d:response", ns)
-        addressbook_url = None
 
+        addressbook_url = None
         for resp in responses:
-            href = resp.find("d:href", ns)
-            if href is not None and "/carddavhome/" in href.text:
-                addressbook_url = href.text
+            href_elem = resp.find("d:href", ns)
+            if href_elem is None:
+                continue
+            href = href_elem.text
+            if href and not href.endswith("/principal/") and href.startswith("/") and "/carddav" in href:
+                addressbook_url = href
                 break
 
         if not addressbook_url:
-            return [{"erro": "Não encontrou a URL do addressbook"}]
+            return [{"erro": "Não encontrou a URL do addressbook", "respostas": [r.find('d:href', ns).text for r in responses if r.find('d:href', ns) is not None]}]
 
         # 3. Fazer REPORT
         report_url = f"https://contacts.icloud.com{addressbook_url}"
