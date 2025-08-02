@@ -1,120 +1,123 @@
 import os
 import requests
 import xml.etree.ElementTree as ET
-import unicodedata
-from requests.auth import HTTPBasicAuth
+import re
+from unidecode import unidecode
 
 APPLE_ID = os.environ.get("APPLE_ID")
 APPLE_APP_PASSWORD = os.environ.get("APPLE_APP_PASSWORD")
-APPLE_CONTACTS_HOST = os.environ.get("APPLE_CONTACTS_HOST", "p42-contacts.icloud.com")
-APPLE_CONTACTS_ID = os.environ.get("APPLE_CONTACTS_ID")
-
-CARD_DAV_URL = f"https://{APPLE_CONTACTS_HOST}/{APPLE_CONTACTS_ID}/carddavhome/"
-
-HEADERS = {
-    "Depth": "1",
-    "Content-Type": "application/xml; charset=utf-8"
-}
-
-REPORT_BODY = '''
-<card:addressbook-query xmlns:d="DAV:" xmlns:card="urn:ietf:params:xml:ns:carddav">
-  <d:prop>
-    <d:getetag />
-    <card:address-data />
-  </d:prop>
-</card:addressbook-query>
-'''
-
-def get_contacts_raw():
-    try:
-        response = requests.request(
-            "REPORT",
-            CARD_DAV_URL,
-            headers=HEADERS,
-            data=REPORT_BODY,
-            auth=HTTPBasicAuth(APPLE_ID, APPLE_APP_PASSWORD)
-        )
-
-        if response.status_code != 207:
-            return {"erro": "Erro no REPORT", "status": response.status_code, "body": response.text}
-
-        return {"vcard": response.text}
-    except Exception as e:
-        return {"erro": f"Exceção inesperada: {str(e)}"}
+CARD_DAV_URL = os.environ.get("CARD_DAV_URL")
 
 def normalize(text):
     if not text:
         return ""
-    return unicodedata.normalize("NFKD", text).encode("ASCII", "ignore").decode("ASCII").lower()
+    return unidecode(text).lower().strip()
 
-def parse_vcards(xml_content):
-    contatos = []
-    ns = {
-        'd': 'DAV:',
-        'card': 'urn:ietf:params:xml:ns:carddav'
-    }
-
+def get_contacts_raw():
     try:
-        root = ET.fromstring(xml_content)
-        for response in root.findall('d:response', ns):
-            contato = {
-                "nome": None,
-                "nome_completo": None,
-                "email": None,
-                "telefone": None,
-                "empresa": None,
-                "cargo": None,
-                "linkedin": None,
-                "facebook": None,
-                "skype": None,
-                "enderecos": [],
-                "datas": [],
-                "tags": [],
-                "foto": None,
-                "site": None,
-                "nome_normalizado": ""
-            }
+        auth = (APPLE_ID, APPLE_APP_PASSWORD)
+        session = requests.Session()
+        session.auth = auth
 
-            vcard_elem = response.find(".//card:address-data", ns)
-            if vcard_elem is not None and vcard_elem.text:
-                vcard = vcard_elem.text.replace("\r\n", "\n").split("\n")
-                for line in vcard:
-                    if line.startswith("FN:"):
-                        contato["nome_completo"] = line[3:]
-                    elif line.startswith("N:"):
-                        partes = line[2:].split(";")
-                        contato["nome"] = " ".join([p for p in partes if p])
-                    elif line.startswith("EMAIL"):
-                        contato["email"] = line.split(":")[-1]
-                    elif line.startswith("TEL"):
-                        contato["telefone"] = line.split(":")[-1]
-                    elif line.startswith("ORG:"):
-                        contato["empresa"] = line[4:]
-                    elif line.startswith("TITLE:"):
-                        contato["cargo"] = line[6:]
-                    elif "linkedin.com/in" in line:
-                        contato["linkedin"] = line.split(":")[-1]
-                    elif "facebook.com" in line:
-                        contato["facebook"] = line.split(":")[-1]
-                    elif "skype" in line.lower():
-                        contato["skype"] = line.split(":")[-1]
-                    elif line.startswith("item") and ".ADR" in line:
-                        contato["enderecos"].append(line.split(":")[-1])
-                    elif line.startswith("item") and ".X-ABDATE" in line:
-                        contato["datas"].append(line.split(":")[-1])
-                    elif line.startswith("item") and ".X-ABLabel" in line:
-                        contato["tags"].append(line.split(":")[-1])
-                    elif line.startswith("PHOTO") and "uri:" in line:
-                        contato["foto"] = line.split("uri:")[-1]
-                    elif line.startswith("URL:"):
-                        contato["site"] = line[4:]
+        if not CARD_DAV_URL:
+            return {"erro": "CARD_DAV_URL não configurada"}
 
-                if contato["nome"] is None:
-                    contato["nome"] = contato["nome_completo"]
+        report_body = """<?xml version="1.0" encoding="UTF-8"?>
+<C:addressbook-query xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:carddav">
+  <D:prop>
+    <D:getetag/>
+    <C:address-data/>
+  </D:prop>
+</C:addressbook-query>
+"""
 
-                contato["nome_normalizado"] = normalize(contato["nome"])
-                contatos.append(contato)
+        headers = {
+            "Content-Type": "application/xml; charset=utf-8",
+            "Depth": "1"
+        }
+
+        response = session.request(
+            "REPORT",
+            CARD_DAV_URL,
+            data=report_body.encode("utf-8"),
+            headers=headers
+        )
+
+        debug_info = {
+            "status": response.status_code,
+            "request_url": response.url,
+            "request_headers": dict(response.request.headers),
+            "response_headers": dict(response.headers),
+            "body": response.text
+        }
+
+        if response.status_code != 207:
+            return {"erro": "Erro no REPORT", **debug_info}
+
+        return {"vcard": response.text}
+
     except Exception as e:
-        contatos.append({"erro": f"Erro no parse: {str(e)}"})
+        return {"erro": f"Exceção inesperada: {str(e)}"}
 
+def parse_vcards(xml_text):
+    ns = {
+        "D": "DAV:",
+        "C": "urn:ietf:params:xml:ns:carddav"
+    }
+    root = ET.fromstring(xml_text)
+    contatos = []
+    for response in root.findall("D:response", ns):
+        vcard_el = response.find("D:propstat/D:prop/C:address-data", ns)
+        if vcard_el is not None:
+            vcard = vcard_el.text or ""
+            contato = parse_single_vcard(vcard)
+            if contato:
+                contatos.append(contato)
     return contatos
+
+def parse_single_vcard(vcard):
+    contato = {}
+    lines = vcard.split("\n")
+    datas = []
+    redes = []
+
+    for line in lines:
+        line = line.strip()
+        if line.startswith("FN:"):
+            contato["nome"] = line[3:].strip()
+            contato["nome_normalizado"] = normalize(contato["nome"])
+        elif line.startswith("EMAIL"):
+            email = line.split(":", 1)[1].strip()
+            contato["email"] = email
+        elif line.startswith("TEL"):
+            telefone = line.split(":", 1)[1].strip()
+            contato["telefone"] = telefone
+        elif line.startswith("ORG:"):
+            contato["empresa"] = line[4:].strip()
+        elif line.startswith("TITLE:"):
+            contato["cargo"] = line[6:].strip()
+        elif line.startswith("X-SOCIALPROFILE"):
+            match = re.search(r'https?://[^"\s]+', line)
+            if match:
+                url = match.group(0)
+                redes.append(url)
+        elif ".X-ABDATE" in line:
+            data = line.split(":", 1)[1].strip()
+            datas.append({"data": data})
+        elif ".X-ABLabel:" in line:
+            if datas:
+                datas[-1]["label"] = line.split(":", 1)[1].strip()
+
+    if redes:
+        for url in redes:
+            if "linkedin.com" in url:
+                contato["linkedin"] = url
+            elif "facebook.com" in url:
+                contato["facebook"] = url
+            elif "skype.com" in url:
+                contato["skype"] = url
+
+    if datas:
+        contato["datas"] = datas
+
+    return contato
