@@ -1,6 +1,7 @@
 import os
 import requests
 import xml.etree.ElementTree as ET
+import unicodedata
 from requests.auth import HTTPBasicAuth
 
 APPLE_ID = os.environ.get("APPLE_ID")
@@ -41,6 +42,11 @@ def get_contacts_raw():
     except Exception as e:
         return {"erro": f"Exceção inesperada: {str(e)}"}
 
+def normalize(text):
+    if not text:
+        return ""
+    return unicodedata.normalize("NFKD", text).encode("ASCII", "ignore").decode("ASCII").lower()
+
 def parse_vcards(xml_content):
     contatos = []
     ns = {
@@ -65,7 +71,8 @@ def parse_vcards(xml_content):
                 "datas": [],
                 "tags": [],
                 "foto": None,
-                "site": None
+                "site": None,
+                "nome_normalizado": ""
             }
 
             vcard_elem = response.find(".//card:address-data", ns)
@@ -105,6 +112,7 @@ def parse_vcards(xml_content):
                 if contato["nome"] is None:
                     contato["nome"] = contato["nome_completo"]
 
+                contato["nome_normalizado"] = normalize(contato["nome"])
                 contatos.append(contato)
     except Exception as e:
         contatos.append({"erro": f"Erro no parse: {str(e)}"})
