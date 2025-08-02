@@ -13,7 +13,7 @@ def get_contacts():
             "Content-Type": "application/xml"
         }
 
-        # Etapa 1 – Descobrir a URL do usuário (current-user-principal)
+        # Etapa 1 – Descobre a URL do usuário (current-user-principal)
         discovery_body = """
         <d:propfind xmlns:d="DAV:">
             <d:prop>
@@ -32,7 +32,7 @@ def get_contacts():
             return [{"erro": "current-user-principal não encontrado"}]
         user_url = f"{base_url}{user_href.text}"
 
-        # Etapa 2 – Descobrir o addressbook
+        # Etapa 2 – Descobre a addressbook
         addressbook_body = """
         <d:propfind xmlns:d="DAV:" xmlns:cs="http://calendarserver.org/ns/">
             <d:prop>
@@ -40,7 +40,7 @@ def get_contacts():
             </d:prop>
         </d:propfind>
         """
-        addressbook_resp = requests.request("PROPFIND", user_url + "/", headers=headers, data=addressbook_body, auth=auth)
+        addressbook_resp = requests.request("PROPFIND", user_url, headers=headers, data=addressbook_body, auth=auth)
         if addressbook_resp.status_code != 207:
             return [{"erro": f"Erro no addressbook: {addressbook_resp.status_code}"}]
 
@@ -50,22 +50,27 @@ def get_contacts():
             return [{"erro": "Nenhum addressbook encontrado"}]
 
         addressbook_path = hrefs[0].text
-        full_addressbook_url = base_url + addressbook_path
+        full_addressbook_url = f"{base_url}{addressbook_path}"
 
-        # Etapa 3 – Buscar os contatos com REPORT
-        report_body = """
-        <c:addressbook-query xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:carddav">
-            <d:prop>
-                <d:getetag />
-                <c:address-data />
-            </d:prop>
-        </c:addressbook-query>
-        """
+        # Etapa 3 – REPORT para buscar os contatos
+        report_body = """<?xml version="1.0" encoding="UTF-8"?>
+<card:addressbook-query xmlns:d="DAV:" xmlns:card="urn:ietf:params:xml:ns:carddav">
+  <d:prop>
+    <d:getetag/>
+    <card:address-data>
+      <card:prop name="FN"/>
+      <card:prop name="TEL"/>
+    </card:address-data>
+  </d:prop>
+</card:addressbook-query>
+"""
         headers["Depth"] = "1"
+        headers["Content-Type"] = "application/xml"
         report_resp = requests.request("REPORT", full_addressbook_url, headers=headers, data=report_body, auth=auth)
         if report_resp.status_code != 207:
             return [{"erro": f"Erro no REPORT: {report_resp.status_code}"}]
 
+        # Etapa 4 – Parse dos vCards
         cards = re.findall(r'BEGIN:VCARD.*?END:VCARD', report_resp.text, re.DOTALL)
         contatos = []
         for card in cards:
