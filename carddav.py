@@ -5,7 +5,6 @@ from requests.auth import HTTPBasicAuth
 
 APPLE_ID = os.getenv("APPLE_ID")
 APPLE_APP_PASSWORD = os.getenv("APPLE_APP_PASSWORD")
-
 AUTH = HTTPBasicAuth(APPLE_ID, APPLE_APP_PASSWORD)
 HEADERS_XML = {"Depth": "1", "Content-Type": "application/xml"}
 CARDDAV_URL = "https://contacts.icloud.com"
@@ -46,29 +45,32 @@ def get_contacts():
             return [{"erro": "Não encontrou o carddavhome"}]
         home_path = home.text
 
-        # 3. Descobrir a URL do addressbook válida (ignorar "/")
-        body_find_addressbook = '''<?xml version="1.0" encoding="UTF-8"?>
+        # 3. Listar todos os possíveis hrefs (para debug)
+        body_list = '''<?xml version="1.0" encoding="UTF-8"?>
         <d:propfind xmlns:d="DAV:" xmlns:cd="urn:ietf:params:xml:ns:carddav">
             <d:prop>
                 <d:displayname/>
                 <cd:addressbook-description/>
             </d:prop>
         </d:propfind>'''
-        r3 = propfind(f"{CARDDAV_URL}{home_path}", body_find_addressbook)
+        r3 = propfind(f"{CARDDAV_URL}{home_path}", body_list)
         tree3 = ET.fromstring(r3.text)
         responses = tree3.findall(".//{DAV:}response")
-        valid_paths = []
-        for r in responses:
-            href = r.find("{DAV:}href")
-            if href is not None and href.text != "/":
-                valid_paths.append(href.text)
 
+        all_paths = []
+        for resp in responses:
+            href = resp.find("{DAV:}href")
+            if href is not None:
+                all_paths.append(href.text)
+
+        # se não achou nenhum path que não seja "/", retorna lista para debug
+        valid_paths = [p for p in all_paths if p and p != "/"]
         if not valid_paths:
-            return [{"erro": "Não encontrou a URL do addressbook", "respostas": [home_path]}]
-        
-        addressbook_path = valid_paths[0]  # usar o primeiro válido
+            return [{"erro": "Não encontrou a URL do addressbook", "respostas": all_paths}]
 
-        # 4. Fazer REPORT para buscar VCards
+        addressbook_path = valid_paths[0]
+
+        # 4. Buscar VCards
         body_report = '''<?xml version="1.0" encoding="UTF-8"?>
         <card:addressbook-query xmlns:d="DAV:" xmlns:card="urn:ietf:params:xml:ns:carddav">
             <d:prop>
