@@ -1,142 +1,112 @@
-import requests
 import os
-import re
+import requests
+import xml.etree.ElementTree as ET
 from requests.auth import HTTPBasicAuth
 
-ICLOUD_USER = os.environ.get("APPLE_ID")
-ICLOUD_PASS = os.environ.get("APPLE_APP_PASSWORD")
-ICLOUD_ID = os.environ.get("APPLE_CONTACTS_ID")  # Ex: 275963685
-ICLOUD_HOST = os.environ.get("APPLE_CONTACTS_HOST", "p42-contacts.icloud.com")
+APPLE_ID = os.environ.get("APPLE_ID")
+APPLE_APP_PASSWORD = os.environ.get("APPLE_APP_PASSWORD")
+APPLE_CONTACTS_HOST = os.environ.get("APPLE_CONTACTS_HOST", "p42-contacts.icloud.com")
+APPLE_CONTACTS_ID = os.environ.get("APPLE_CONTACTS_ID")
+
+CARD_DAV_URL = f"https://{APPLE_CONTACTS_HOST}/{APPLE_CONTACTS_ID}/carddavhome/"
 
 HEADERS = {
     "Depth": "1",
-    "Content-Type": "application/xml; charset=utf-8",
+    "Content-Type": "application/xml; charset=utf-8"
 }
 
-def get_contacts_raw():
-    base_url = f"https://{ICLOUD_HOST}/{ICLOUD_ID}/carddavhome/"
+REPORT_BODY = '''
+<card:addressbook-query xmlns:d="DAV:" xmlns:card="urn:ietf:params:xml:ns:carddav">
+  <d:prop>
+    <d:getetag />
+    <card:address-data />
+  </d:prop>
+</card:addressbook-query>
+'''
 
-    report_body = """<?xml version=\"1.0\" encoding=\"UTF-8\" ?>
-<C:addressbook-query xmlns:D=\"DAV:\" xmlns:C=\"urn:ietf:params:xml:ns:carddav\">
-  <D:prop>
-    <D:getetag/>
-    <C:address-data/>
-  </D:prop>
-</C:addressbook-query>"""
+def get_contacts_raw():
+    try:
+        response = requests.request(
+            "REPORT",
+            CARD_DAV_URL,
+            headers=HEADERS,
+            data=REPORT_BODY,
+            auth=HTTPBasicAuth(APPLE_ID, APPLE_APP_PASSWORD)
+        )
+
+        if response.status_code != 207:
+            return {"erro": "Erro no REPORT", "status": response.status_code, "body": response.text}
+
+        return {"vcard": response.text}
+    except Exception as e:
+        return {"erro": f"Exceção inesperada: {str(e)}"}
+
+def parse_vcards(xml_content):
+    contatos = []
+    ns = {
+        'd': 'DAV:',
+        'card': 'urn:ietf:params:xml:ns:carddav'
+    }
 
     try:
-        r = requests.request("REPORT", base_url, data=report_body, headers=HEADERS, auth=HTTPBasicAuth(ICLOUD_USER, ICLOUD_PASS))
-        if r.status_code != 207:
-            return {"erro": "Erro no REPORT", "status": r.status_code, "body": r.text}
-        return {"vcard": r.text}
+        root = ET.fromstring(xml_content)
+        for response in root.findall('d:response', ns):
+            contato = {
+                "nome": None,
+                "nome_completo": None,
+                "email": None,
+                "telefone": None,
+                "empresa": None,
+                "cargo": None,
+                "linkedin": None,
+                "facebook": None,
+                "skype": None,
+                "enderecos": [],
+                "datas": [],
+                "tags": [],
+                "foto": None,
+                "site": None
+            }
+
+            vcard_elem = response.find(".//card:address-data", ns)
+            if vcard_elem is not None and vcard_elem.text:
+                vcard = vcard_elem.text.replace("\r\n", "\n").split("\n")
+                for line in vcard:
+                    if line.startswith("FN:"):
+                        contato["nome_completo"] = line[3:]
+                    elif line.startswith("N:"):
+                        partes = line[2:].split(";")
+                        contato["nome"] = " ".join([p for p in partes if p])
+                    elif line.startswith("EMAIL"):
+                        contato["email"] = line.split(":")[-1]
+                    elif line.startswith("TEL"):
+                        contato["telefone"] = line.split(":")[-1]
+                    elif line.startswith("ORG:"):
+                        contato["empresa"] = line[4:]
+                    elif line.startswith("TITLE:"):
+                        contato["cargo"] = line[6:]
+                    elif "linkedin.com/in" in line:
+                        contato["linkedin"] = line.split(":")[-1]
+                    elif "facebook.com" in line:
+                        contato["facebook"] = line.split(":")[-1]
+                    elif "skype" in line.lower():
+                        contato["skype"] = line.split(":")[-1]
+                    elif line.startswith("item") and ".ADR" in line:
+                        contato["enderecos"].append(line.split(":")[-1])
+                    elif line.startswith("item") and ".X-ABDATE" in line:
+                        contato["datas"].append(line.split(":")[-1])
+                    elif line.startswith("item") and ".X-ABLabel" in line:
+                        contato["tags"].append(line.split(":")[-1])
+                    elif line.startswith("PHOTO") and "uri:" in line:
+                        contato["foto"] = line.split("uri:")[-1]
+                    elif line.startswith("URL:"):
+                        contato["site"] = line[4:]
+
+                if contato["nome"] is None:
+                    contato["nome"] = contato["nome_completo"]
+
+                contatos.append(contato)
     except Exception as e:
-        return {"erro": f"Exceção inesperada: {e}"}
-
-def parse_vcards(vcards_raw: str):
-    contatos = []
-    vcard_blocks = re.findall(r"BEGIN:VCARD.*?END:VCARD", vcards_raw, re.DOTALL)
-
-    for vcard in vcard_blocks:
-        contato = {
-            "nome": None,
-            "nome_completo": None,
-            "apelido": None,
-            "email": [],
-            "telefone": [],
-            "empresa": None,
-            "cargo": None,
-            "endereco": [],
-            "aniversario": None,
-            "notas": None,
-            "linkedin": None,
-            "outras_redes": {},
-            "websites": [],
-            "tags": [],
-            "imagem": None,
-            "uid": None,
-            "eventos": {}
-        }
-
-        eventos_tmp = {}
-        lines = vcard.splitlines()
-
-        for line in lines:
-            line = line.strip()
-
-            if line.startswith("FN:"):
-                contato["nome_completo"] = line[3:].strip()
-
-            elif line.startswith("N:"):
-                partes = line[2:].split(";")
-                contato["nome"] = partes[1].strip() if len(partes) > 1 else partes[0].strip()
-
-            elif line.startswith("NICKNAME:"):
-                contato["apelido"] = line[9:].strip()
-
-            elif line.startswith("EMAIL"):
-                parts = line.split(":")
-                if len(parts) > 1:
-                    contato["email"].append(parts[-1].strip())
-
-            elif line.startswith("TEL"):
-                parts = line.split(":")
-                if len(parts) > 1:
-                    contato["telefone"].append(parts[-1].strip())
-
-            elif line.startswith("ORG:"):
-                contato["empresa"] = line[4:].strip()
-
-            elif line.startswith("TITLE:"):
-                contato["cargo"] = line[6:].strip()
-
-            elif "ADR" in line:
-                parts = line.split(":")
-                if len(parts) > 1:
-                    endereco = parts[-1].replace(";", " ").strip()
-                    contato["endereco"].append(endereco)
-
-            elif line.startswith("BDAY:"):
-                contato["aniversario"] = line[5:].strip()
-
-            elif line.startswith("NOTE:"):
-                contato["notas"] = line[5:].strip()
-
-            elif line.startswith("PHOTO") and "VALUE=uri:" in line:
-                parts = line.split("VALUE=uri:")
-                if len(parts) > 1:
-                    contato["imagem"] = parts[-1].strip()
-
-            elif line.startswith("UID:"):
-                contato["uid"] = line[4:].strip()
-
-            elif line.startswith("URL:"):
-                contato["websites"].append(line[4:].strip())
-
-            elif "X-ABLabel" in line and not re.match(r"item\d+\.X-ABLabel", line):
-                label = line.split(":")[-1].strip()
-                contato["tags"].append(label)
-
-            elif "X-SOCIALPROFILE" in line:
-                parts = line.split(":")
-                if len(parts) > 1:
-                    url = parts[-1].strip()
-                    if "linkedin.com" in url:
-                        contato["linkedin"] = url
-                    else:
-                        tipo_match = re.search(r"type=([^;:]+)", line.lower())
-                        tipo = tipo_match.group(1) if tipo_match else "outro"
-                        contato["outras_redes"][tipo] = url
-
-            elif re.match(r"item\d+\.X-ABDATE", line):
-                item, date = line.split(":")
-                eventos_tmp[item.replace(".X-ABDATE", "")] = date.strip()
-
-            elif re.match(r"item\d+\.X-ABLabel", line):
-                item, label = line.split(":")
-                item_id = item.replace(".X-ABLabel", "")
-                if item_id in eventos_tmp:
-                    contato["eventos"][label.strip()] = eventos_tmp[item_id]
-
-        contatos.append(contato)
+        contatos.append({"erro": f"Erro no parse: {str(e)}"})
 
     return contatos
