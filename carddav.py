@@ -13,7 +13,7 @@ def get_contacts():
             "Content-Type": "application/xml"
         }
 
-        # Etapa 1 – Descobre a URL do usuário (current-user-principal)
+        # Etapa 1 – Descobrir o caminho do usuário (current-user-principal)
         discovery_body = """
         <d:propfind xmlns:d="DAV:">
             <d:prop>
@@ -32,7 +32,7 @@ def get_contacts():
             return [{"erro": "current-user-principal não encontrado"}]
         user_url = f"{base_url}{user_href.text}"
 
-        # Etapa 2 – Descobre a addressbook
+        # Etapa 2 – Descobrir o addressbook
         addressbook_body = """
         <d:propfind xmlns:d="DAV:" xmlns:cs="http://calendarserver.org/ns/">
             <d:prop>
@@ -52,11 +52,10 @@ def get_contacts():
         addressbook_path = hrefs[0].text
         full_addressbook_url = f"{base_url}{addressbook_path}"
 
-        # Etapa 3 – REPORT para buscar os contatos
+        # Etapa 3 – REPORT com XML compatível com Apple
         report_body = """<?xml version="1.0" encoding="UTF-8"?>
-<card:addressbook-query xmlns:d="DAV:" xmlns:card="urn:ietf:params:xml:ns:carddav">
+<card:addressbook-query xmlns:card="urn:ietf:params:xml:ns:carddav" xmlns:d="DAV:">
   <d:prop>
-    <d:getetag/>
     <card:address-data>
       <card:prop name="FN"/>
       <card:prop name="TEL"/>
@@ -68,7 +67,7 @@ def get_contacts():
         headers["Content-Type"] = "application/xml"
         report_resp = requests.request("REPORT", full_addressbook_url, headers=headers, data=report_body, auth=auth)
         if report_resp.status_code != 207:
-            return [{"erro": f"Erro no REPORT: {report_resp.status_code}"}]
+            return [{"erro": f"Erro no REPORT: {report_resp.status_code}", "body": report_resp.text[:500]}]
 
         # Etapa 4 – Parse dos vCards
         cards = re.findall(r'BEGIN:VCARD.*?END:VCARD', report_resp.text, re.DOTALL)
