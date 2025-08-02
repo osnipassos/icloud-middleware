@@ -7,80 +7,73 @@ def get_contacts():
     try:
         auth = HTTPBasicAuth(os.getenv("APPLE_ID"), os.getenv("APPLE_APP_PASSWORD"))
 
-        ns = {"d": "DAV:", "card": "urn:ietf:params:xml:ns:carddav"}
+        # 1. Descobrir URL principal
+        principal_req = requests.request(
+            "PROPFIND",
+            "https://contacts.icloud.com/",
+            headers={"Depth": "0", "Content-Type": "application/xml"},
+            data="""<?xml version="1.0" encoding="utf-8" ?>
+<propfind xmlns="DAV:">
+  <prop>
+    <current-user-principal />
+  </prop>
+</propfind>""",
+            auth=auth,
+        )
 
-        # 1. Descobrir a URL principal
-        url_base = "https://contacts.icloud.com/"
-        headers = {"Depth": "0", "Content-Type": "application/xml"}
-        body1 = """<?xml version="1.0" encoding="UTF-8"?>
-        <propfind xmlns="DAV:">
-          <prop>
-            <current-user-principal/>
-          </prop>
-        </propfind>"""
+        principal_tree = ET.fromstring(principal_req.text)
+        ns = {"D": "DAV:"}
+        href_el = principal_tree.find(".//D:current-user-principal/D:href", ns)
+        if href_el is None:
+            return [{"erro": "Não encontrou current-user-principal"}]
+        principal_url = href_el.text
 
-        r1 = requests.request("PROPFIND", url_base, headers=headers, data=body1, auth=auth)
-        if r1.status_code != 207:
-            return [{"erro": "Erro no PROPFIND 1", "status": r1.status_code, "body": r1.text}]
-        root1 = ET.fromstring(r1.text)
-        principal_href = root1.find(".//d:current-user-principal/d:href", ns).text
+        # 2. Descobrir addressbook-home-set
+        home_req = requests.request(
+            "PROPFIND",
+            f"https://contacts.icloud.com{principal_url}",
+            headers={"Depth": "0", "Content-Type": "application/xml"},
+            data="""<?xml version="1.0" encoding="utf-8" ?>
+<propfind xmlns="DAV:">
+  <prop>
+    <addressbook-home-set xmlns="urn:ietf:params:xml:ns:carddav"/>
+  </prop>
+</propfind>""",
+            auth=auth,
+        )
 
-        # 2. Fazer novo PROPFIND no /principal/ para descobrir o addressbook-home-set
-        url_principal = f"https://contacts.icloud.com{principal_href}"
-        headers["Depth"] = "0"
-        body2 = """<?xml version="1.0" encoding="UTF-8"?>
-        <propfind xmlns="DAV:" xmlns:card="urn:ietf:params:xml:ns:carddav">
-          <prop>
-            <card:addressbook-home-set/>
-          </prop>
-        </propfind>"""
+        home_tree = ET.fromstring(home_req.text)
+        href_el = home_tree.find(".//{urn:ietf:params:xml:ns:carddav}addressbook-home-set/{DAV:}href")
+        if href_el is None:
+            return [{"erro": "Não encontrou a URL do addressbook", "respostas": [principal_url]}]
 
-        r2 = requests.request("PROPFIND", url_principal, headers=headers, data=body2, auth=auth)
-        if r2.status_code != 207:
-            return [{"erro": "Erro no PROPFIND 2", "status": r2.status_code, "body": r2.text}]
-        root2 = ET.fromstring(r2.text)
-        addressbook_home = root2.find(".//card:addressbook-home-set/d:href", ns).text
+        home_url = href_el.text
 
-        # 3. Fazer novo PROPFIND no /carddavhome/ para descobrir a collection
-        url_home = f"https://contacts.icloud.com{addressbook_home}"
-        headers["Depth"] = "1"
-        body3 = """<?xml version="1.0" encoding="UTF-8"?>
-        <propfind xmlns="DAV:">
-          <prop>
-            <displayname/>
-          </prop>
-        </propfind>"""
+        # Corrigir erro de concatenação da URL
+        if home_url.startswith("http"):
+            collection_url = home_url
+        else:
+            collection_url = f"https://contacts.icloud.com{home_url}"
 
-        r3 = requests.request("PROPFIND", url_home, headers=headers, data=body3, auth=auth)
-        if r3.status_code != 207:
-            return [{"erro": "Erro no PROPFIND 3", "status": r3.status_code, "body": r3.text}]
-        root3 = ET.fromstring(r3.text)
-        collection_href = None
-        for resp in root3.findall(".//d:response", ns):
-            href = resp.find("d:href", ns).text
-            if href and href != addressbook_home:
-                collection_href = href
-                break
+        # 3. REPORT para obter os contatos
+        report_req = requests.request(
+            "REPORT",
+            collection_url,
+            headers={"Depth": "1", "Content-Type": "application/xml"},
+            data="""<?xml version="1.0" encoding="utf-8" ?>
+<card:addressbook-query xmlns:card="urn:ietf:params:xml:ns:carddav">
+  <prop xmlns="DAV:">
+    <getetag/>
+    <address-data xmlns="urn:ietf:params:xml:ns:carddav"/>
+  </prop>
+</card:addressbook-query>""",
+            auth=auth,
+        )
 
-        if not collection_href:
-            return [{"erro": "Não encontrou collection do addressbook"}]
+        if report_req.status_code != 207:
+            return [{"erro": "Erro no REPORT", "body": report_req.text}]
 
-        # 4. Fazer REPORT na collection
-        report_url = f"https://contacts.icloud.com{collection_href}"
-        headers = {"Depth": "1", "Content-Type": "application/xml"}
-        body4 = """<?xml version="1.0" encoding="UTF-8"?>
-        <card:addressbook-query xmlns:d="DAV:" xmlns:card="urn:ietf:params:xml:ns:carddav">
-          <d:prop>
-            <d:getetag/>
-            <card:address-data/>
-          </d:prop>
-        </card:addressbook-query>"""
-
-        r4 = requests.request("REPORT", report_url, headers=headers, data=body4, auth=auth)
-        if r4.status_code != 207:
-            return [{"erro": "Erro no REPORT", "body": r4.text}]
-
-        return [{"vcard_raw": r4.text}]
+        return [{"vcard": report_req.text}]
 
     except Exception as e:
-        return [{"erro": f"Exceção inesperada: {str(e)}"}]
+        return [{"erro": f"Exceção inesperada: {e}"}]
