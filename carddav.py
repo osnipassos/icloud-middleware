@@ -30,7 +30,7 @@ def get_contacts():
         user_href = tree.find('.//d:current-user-principal/d:href', ns)
         if user_href is None:
             return [{"erro": "current-user-principal não encontrado"}]
-        user_url = base_url + user_href.text.strip('/')
+        user_url = f"{base_url}{user_href.text}"
 
         # Etapa 2 – Descobrir o addressbook
         addressbook_body = """
