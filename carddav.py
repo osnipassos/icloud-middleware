@@ -13,7 +13,7 @@ def get_contacts():
             "Content-Type": "application/xml"
         }
 
-        # Etapa 1 – Descobrir o caminho do usuário (current-user-principal)
+        # Etapa 1: Descobre o current-user-principal
         discovery_body = """
         <d:propfind xmlns:d="DAV:">
             <d:prop>
@@ -21,38 +21,63 @@ def get_contacts():
             </d:prop>
         </d:propfind>
         """
-        discovery_resp = requests.request("PROPFIND", base_url + "/", headers=headers, data=discovery_body, auth=auth)
-        if discovery_resp.status_code != 207:
-            return [{"erro": f"Erro no discovery: {discovery_resp.status_code}"}]
+        r1 = requests.request("PROPFIND", f"{base_url}/", headers=headers, data=discovery_body, auth=auth)
+        if r1.status_code != 207:
+            return [{"erro": f"Erro no discovery: {r1.status_code}"}]
 
-        tree = ET.fromstring(discovery_resp.text)
+        tree = ET.fromstring(r1.text)
         ns = {'d': 'DAV:'}
         user_href = tree.find('.//d:current-user-principal/d:href', ns)
         if user_href is None:
             return [{"erro": "current-user-principal não encontrado"}]
-        user_url = f"{base_url}{user_href.text}"
+        user_path = user_href.text
 
-        # Etapa 2 – Descobrir o addressbook
-        addressbook_body = """
-        <d:propfind xmlns:d="DAV:" xmlns:cs="http://calendarserver.org/ns/">
-            <d:prop>
-                <d:displayname />
-            </d:prop>
+        # Etapa 2: Descobre o addressbook-home-set
+        propfind_body = """
+        <d:propfind xmlns:d="DAV:" xmlns:card="urn:ietf:params:xml:ns:carddav">
+          <d:prop>
+            <card:addressbook-home-set />
+          </d:prop>
         </d:propfind>
         """
-        addressbook_resp = requests.request("PROPFIND", user_url, headers=headers, data=addressbook_body, auth=auth)
-        if addressbook_resp.status_code != 207:
-            return [{"erro": f"Erro no addressbook: {addressbook_resp.status_code}"}]
+        r2 = requests.request("PROPFIND", f"{base_url}{user_path}", headers=headers, data=propfind_body, auth=auth)
+        if r2.status_code != 207:
+            return [{"erro": f"Erro ao buscar addressbook-home-set: {r2.status_code}"}]
 
-        tree = ET.fromstring(addressbook_resp.text)
-        hrefs = tree.findall('.//d:response/d:href', ns)
-        if not hrefs:
-            return [{"erro": "Nenhum addressbook encontrado"}]
+        tree = ET.fromstring(r2.text)
+        home_href = tree.find('.//card:addressbook-home-set/d:href', {'card': 'urn:ietf:params:xml:ns:carddav', 'd': 'DAV:'})
+        if home_href is None:
+            return [{"erro": "addressbook-home-set não encontrado"}]
+        addressbook_home = home_href.text
 
-        addressbook_path = hrefs[0].text
-        full_addressbook_url = f"{base_url}{addressbook_path}"
+        # Etapa 3: Descobre o caminho completo do addressbook
+        r3 = requests.request("PROPFIND", f"{base_url}{addressbook_home}", headers=headers, data="""
+        <d:propfind xmlns:d="DAV:">
+          <d:prop>
+            <d:resourcetype />
+            <d:displayname />
+          </d:prop>
+        </d:propfind>
+        """, auth=auth)
+        if r3.status_code != 207:
+            return [{"erro": f"Erro ao buscar path do addressbook: {r3.status_code}"}]
 
-        # Etapa 3 – REPORT com XML compatível com Apple
+        tree = ET.fromstring(r3.text)
+        responses = tree.findall('.//d:response', ns)
+        addressbook_path = None
+        for resp in responses:
+            if resp.find('.//d:resourcetype/d:collection', ns) is not None and resp.find('.//d:resourcetype/card:addressbook', {'d': 'DAV:', 'card': 'urn:ietf:params:xml:ns:carddav'}) is not None:
+                href = resp.find('d:href', ns)
+                if href is not None:
+                    addressbook_path = href.text
+                    break
+
+        if not addressbook_path:
+            return [{"erro": "addressbook não encontrado"}]
+
+        full_url = f"{base_url}{addressbook_path}"
+
+        # Etapa 4: REPORT com dados dos contatos
         report_body = """<?xml version="1.0" encoding="UTF-8"?>
 <card:addressbook-query xmlns:card="urn:ietf:params:xml:ns:carddav" xmlns:d="DAV:">
   <d:prop>
@@ -64,13 +89,11 @@ def get_contacts():
 </card:addressbook-query>
 """
         headers["Depth"] = "1"
-        headers["Content-Type"] = "application/xml"
-        report_resp = requests.request("REPORT", full_addressbook_url, headers=headers, data=report_body, auth=auth)
-        if report_resp.status_code != 207:
-            return [{"erro": f"Erro no REPORT: {report_resp.status_code}", "body": report_resp.text[:500]}]
+        r4 = requests.request("REPORT", full_url, headers=headers, data=report_body, auth=auth)
+        if r4.status_code != 207:
+            return [{"erro": f"Erro no REPORT: {r4.status_code}", "body": r4.text[:300]}]
 
-        # Etapa 4 – Parse dos vCards
-        cards = re.findall(r'BEGIN:VCARD.*?END:VCARD', report_resp.text, re.DOTALL)
+        cards = re.findall(r'BEGIN:VCARD.*?END:VCARD', r4.text, re.DOTALL)
         contatos = []
         for card in cards:
             nome_match = re.search(r'FN:(.+)', card)
