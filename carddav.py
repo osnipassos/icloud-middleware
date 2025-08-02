@@ -13,7 +13,7 @@ def get_contacts():
             "Content-Type": "application/xml"
         }
 
-        # Etapa 1: Descobre o current-user-principal
+        # Descobrir o current-user-principal
         discovery_body = """
         <d:propfind xmlns:d="DAV:">
             <d:prop>
@@ -32,7 +32,7 @@ def get_contacts():
             return [{"erro": "current-user-principal não encontrado"}]
         user_path = user_href.text
 
-        # Etapa 2: Descobre o addressbook-home-set
+        # Buscar o addressbook-home-set
         propfind_body = """
         <d:propfind xmlns:d="DAV:" xmlns:card="urn:ietf:params:xml:ns:carddav">
           <d:prop>
@@ -50,7 +50,7 @@ def get_contacts():
             return [{"erro": "addressbook-home-set não encontrado"}]
         addressbook_home = home_href.text
 
-        # Etapa 3: Descobre o caminho completo do addressbook
+        # Buscar o path real do addressbook
         r3 = requests.request("PROPFIND", f"{base_url}{addressbook_home}", headers=headers, data="""
         <d:propfind xmlns:d="DAV:">
           <d:prop>
@@ -66,7 +66,8 @@ def get_contacts():
         responses = tree.findall('.//d:response', ns)
         addressbook_path = None
         for resp in responses:
-            if resp.find('.//d:resourcetype/d:collection', ns) is not None and resp.find('.//d:resourcetype/card:addressbook', {'d': 'DAV:', 'card': 'urn:ietf:params:xml:ns:carddav'}) is not None:
+            if resp.find('.//d:resourcetype/d:collection', ns) is not None and \
+               resp.find('.//d:resourcetype/card:addressbook', {'d': 'DAV:', 'card': 'urn:ietf:params:xml:ns:carddav'}) is not None:
                 href = resp.find('d:href', ns)
                 if href is not None:
                     addressbook_path = href.text
@@ -75,9 +76,10 @@ def get_contacts():
         if not addressbook_path:
             return [{"erro": "addressbook não encontrado"}]
 
-        full_url = f"{base_url}{addressbook_path}"
+        # ⚠️ Aqui está a correção para evitar URL duplicada
+        full_url = addressbook_path if addressbook_path.startswith("http") else f"{base_url}{addressbook_path}"
 
-        # Etapa 4: REPORT com dados dos contatos
+        # REPORT
         report_body = """<?xml version="1.0" encoding="UTF-8"?>
 <card:addressbook-query xmlns:card="urn:ietf:params:xml:ns:carddav" xmlns:d="DAV:">
   <d:prop>
