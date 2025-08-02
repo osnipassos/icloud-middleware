@@ -1,51 +1,49 @@
 from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from carddav import get_contacts_raw, parse_vcards, normalize
 import os
-from carddav import get_contacts_raw, parse_vcards
+
+API_TOKEN = os.environ.get("API_TOKEN")
 
 app = FastAPI()
 
-origins = ["*"]
-
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-API_TOKEN = os.getenv("API_TOKEN")
 
-@app.middleware("http")
-async def check_auth(request: Request, call_next):
-    if request.url.path.startswith("/contato") or request.url.path == "/contatos":
-        auth_header = request.headers.get("Authorization")
-        if not auth_header or not auth_header.startswith("Bearer "):
-            return JSONResponse(status_code=401, content={"erro": "Token ausente"})
-        token = auth_header.split("Bearer ")[-1]
-        if token != API_TOKEN:
-            return JSONResponse(status_code=403, content={"erro": "Token inválido"})
-    return await call_next(request)
+def auth(request: Request):
+    token = request.headers.get("Authorization")
+    if not token or not token.startswith("Bearer ") or token.split(" ")[1] != API_TOKEN:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
 
 @app.get("/contatos")
-def contatos():
-    resultado = get_contacts_raw()
-    if "vcard" in resultado:
-        return {"contatos": parse_vcards(resultado["vcard"])}
-    else:
-        return {"contatos": [resultado]}
+async def listar_contatos(request: Request):
+    auth(request)
+    raw = get_contacts_raw()
+    if "vcard" in raw:
+        contatos = parse_vcards(raw["vcard"])
+        return JSONResponse(content={"contatos": contatos})
+    return JSONResponse(content={"contatos": [raw]})
+
 
 @app.get("/contato")
-def contato_por_nome(nome: str):
+async def buscar_contato(request: Request, nome: str):
+    auth(request)
     try:
-        resultado = get_contacts_raw()
-        if "vcard" not in resultado:
-            return {"contatos": [resultado]}
-
-        contatos = parse_vcards(resultado["vcard"])
-        filtrados = [c for c in contatos if nome.lower() in (c["nome_completo"] or "").lower()]
-        return {"contatos": filtrados}
+        raw = get_contacts_raw()
+        if "vcard" in raw:
+            contatos = parse_vcards(raw["vcard"])
+            nome_normalizado = normalize(nome)
+            filtrados = [c for c in contatos if nome_normalizado in c.get("nome_normalizado", "")]
+            return JSONResponse(content={"contatos": filtrados})
+        else:
+            return JSONResponse(content={"erro": "Erro ao buscar contato por nome", **raw})
     except Exception as e:
-        return {"erro": f"Erro ao buscar contato por nome: {str(e)}"}
+        return JSONResponse(content={"erro": f"Exceção inesperada: {str(e)}"})
