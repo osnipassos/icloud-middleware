@@ -8,7 +8,6 @@ APPLE_APP_PASSWORD = os.getenv("APPLE_APP_PASSWORD")
 
 AUTH = HTTPBasicAuth(APPLE_ID, APPLE_APP_PASSWORD)
 HEADERS_XML = {"Depth": "1", "Content-Type": "application/xml"}
-
 CARDDAV_URL = "https://contacts.icloud.com"
 
 def propfind(url, xml_body):
@@ -26,13 +25,11 @@ def get_contacts():
                 <d:current-user-principal/>
             </d:prop>
         </d:propfind>'''
-
         r1 = propfind(f"{CARDDAV_URL}/", body_principal)
         tree1 = ET.fromstring(r1.text)
         principal = tree1.find(".//{DAV:}href")
         if principal is None:
             return [{"erro": "Não encontrou o principal"}]
-
         principal_path = principal.text
 
         # 2. Descobrir o carddavhome
@@ -42,16 +39,14 @@ def get_contacts():
                 <cs:addressbook-home-set/>
             </d:prop>
         </d:propfind>'''
-
         r2 = propfind(f"{CARDDAV_URL}{principal_path}", body_home)
         tree2 = ET.fromstring(r2.text)
         home = tree2.find(".//{DAV:}href")
         if home is None:
             return [{"erro": "Não encontrou o carddavhome"}]
-
         home_path = home.text
 
-        # 3. Descobrir o addressbook correto
+        # 3. Descobrir a URL do addressbook válida (ignorar "/")
         body_find_addressbook = '''<?xml version="1.0" encoding="UTF-8"?>
         <d:propfind xmlns:d="DAV:" xmlns:cd="urn:ietf:params:xml:ns:carddav">
             <d:prop>
@@ -59,17 +54,21 @@ def get_contacts():
                 <cd:addressbook-description/>
             </d:prop>
         </d:propfind>'''
-
         r3 = propfind(f"{CARDDAV_URL}{home_path}", body_find_addressbook)
         tree3 = ET.fromstring(r3.text)
-        addressbooks = tree3.findall(".//{DAV:}response")
-        if not addressbooks:
+        responses = tree3.findall(".//{DAV:}response")
+        valid_paths = []
+        for r in responses:
+            href = r.find("{DAV:}href")
+            if href is not None and href.text != "/":
+                valid_paths.append(href.text)
+
+        if not valid_paths:
             return [{"erro": "Não encontrou a URL do addressbook", "respostas": [home_path]}]
+        
+        addressbook_path = valid_paths[0]  # usar o primeiro válido
 
-        # Normalmente é o primeiro que tem os contatos
-        addressbook_path = addressbooks[0].find("{DAV:}href").text
-
-        # 4. Fazer o REPORT para buscar os VCards
+        # 4. Fazer REPORT para buscar VCards
         body_report = '''<?xml version="1.0" encoding="UTF-8"?>
         <card:addressbook-query xmlns:d="DAV:" xmlns:card="urn:ietf:params:xml:ns:carddav">
             <d:prop>
@@ -77,7 +76,6 @@ def get_contacts():
                 <card:address-data/>
             </d:prop>
         </card:addressbook-query>'''
-
         r4 = report(f"{CARDDAV_URL}{addressbook_path}", body_report)
 
         if r4.status_code != 207:
@@ -85,7 +83,6 @@ def get_contacts():
 
         tree4 = ET.fromstring(r4.text)
         vcards = tree4.findall(".//{urn:ietf:params:xml:ns:carddav}address-data")
-
         contatos = [{"vcard": v.text} for v in vcards if v.text]
         return contatos if contatos else [{"erro": "Nenhum contato encontrado"}]
 
