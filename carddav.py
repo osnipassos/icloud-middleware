@@ -1,10 +1,11 @@
 import requests
 import re
+import os
 from xml.etree import ElementTree as ET
 
-ICLOUD_USERNAME = "seu_usuario@icloud.com"
-ICLOUD_PASSWORD = "sua_senha_do_app"
-ICLOUD_URL = "https://contacts.icloud.com"
+ICLOUD_USERNAME = os.getenv("APPLE_ID")
+ICLOUD_PASSWORD = os.getenv("APPLE_APP_PASSWORD")
+ICLOUD_URL = os.getenv("ICLOUD_URL", "https://contacts.icloud.com")
 
 HEADERS = {
     "Depth": "1",
