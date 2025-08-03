@@ -5,3 +5,4 @@ python-dotenv
 unidecode
 vobject
 icalendar
+beautifulsoup4
