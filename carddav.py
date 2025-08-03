@@ -1,114 +1,118 @@
 import os
-import requests
 import vobject
+import requests
+from requests.auth import HTTPBasicAuth
 from bs4 import BeautifulSoup
-from dotenv import load_dotenv
 
-load_dotenv()
-
-APPLE_ID = os.getenv("APPLE_ID")
-APPLE_APP_PASSWORD = os.getenv("APPLE_APP_PASSWORD")
-CARD_DAV_URL = os.getenv("CARD_DAV_URL")
-
-HEADERS = {
-    "Depth": "1",
-    "Content-Type": "application/xml; charset=utf-8"
-}
-
-XML_BODY = """<?xml version="1.0" encoding="UTF-8"?>
-<card:addressbook-query xmlns:d="DAV:" xmlns:card="urn:ietf:params:xml:ns:carddav">
-  <d:prop>
-    <d:getetag/>
-    <card:address-data/>
-  </d:prop>
-</card:addressbook-query>"""
+APPLE_ID = os.environ.get("APPLE_ID")
+APPLE_APP_PASSWORD = os.environ.get("APPLE_APP_PASSWORD")
+CARD_DAV_URL = os.environ.get("CARD_DAV_URL")
 
 def get_contacts_raw():
-    auth = (APPLE_ID, APPLE_APP_PASSWORD)
-    try:
-        response = requests.request(
-            "REPORT",
-            CARD_DAV_URL,
-            headers=HEADERS,
-            data=XML_BODY,
-            auth=auth
-        )
-        if response.status_code != 207:
-            raise Exception((
-                "Erro no REPORT",
-                response.status_code,
-                CARD_DAV_URL,
-                dict(response.headers),
-                response.text,
-            ))
+    url = CARD_DAV_URL
+    headers = {
+        "Content-Type": "application/xml; charset=utf-8",
+        "Depth": "1"
+    }
 
-        soup = BeautifulSoup(response.content, "xml")
-        vcards = [vcard.text for vcard in soup.find_all("address-data")]
-        return vcards
-    except Exception as e:
-        raise Exception(f"Erro ao obter contatos: {e}")
+    data = """<?xml version="1.0" encoding="UTF-8"?>
+    <A:propfind xmlns:A="DAV:" xmlns:C="urn:ietf:params:xml:ns:carddav">
+        <A:prop>
+            <A:getetag />
+            <C:address-data />
+        </A:prop>
+    </A:propfind>"""
+
+    response = requests.request(
+        "REPORT",
+        url,
+        headers=headers,
+        data=data,
+        auth=HTTPBasicAuth(APPLE_ID, APPLE_APP_PASSWORD)
+    )
+
+    if response.status_code != 207:
+        raise Exception(("Erro no REPORT", response.status_code, url, response.headers, response.text))
+
+    soup = BeautifulSoup(response.content, "xml")
+    vcards = []
+    for address_data in soup.find_all("address-data"):
+        try:
+            vcard = vobject.readOne(address_data.text)
+            vcards.append(vcard)
+        except Exception:
+            continue
+
+    return vcards
 
 def parse_vcards(vcards):
     contatos = []
-    for vcard_str in vcards:
-        try:
-            vcard = vobject.readOne(vcard_str)
-            contato = {}
+    for vcard in vcards:
+        contato = {
+            "nome_completo": None,
+            "apelido": None,
+            "telefones": [],
+            "emails": [],
+            "endereco": None,
+            "empresa": None,
+            "cargo": None,
+            "notas": None,
+            "aniversario": None,
+            "linkedin": None,
+        }
 
-            # Nome e apelido
-            contato["nome_completo"] = getattr(vcard, "fn", None).value if hasattr(vcard, "fn") else None
-            contato["apelido"] = getattr(vcard, "nickname", None).value if hasattr(vcard, "nickname") else None
+        for key in vcard.contents.keys():
+            if key == "fn":
+                contato["nome_completo"] = str(vcard.contents[key][0].value)
+            elif key == "nickname":
+                contato["apelido"] = str(vcard.contents[key][0].value)
+            elif key == "tel":
+                contato["telefones"].append(str(vcard.contents[key][0].value))
+            elif key == "email":
+                contato["emails"].append(str(vcard.contents[key][0].value))
+            elif key == "adr":
+                endereco_obj = vcard.contents[key][0].value
+                endereco_str = ", ".join(filter(None, [
+                    endereco_obj.street,
+                    endereco_obj.city,
+                    endereco_obj.region,
+                    endereco_obj.code,
+                    endereco_obj.country
+                ]))
+                contato["endereco"] = endereco_str if endereco_str else None
+            elif key == "org":
+                org = vcard.contents[key][0].value
+                if isinstance(org, list) and len(org) > 0:
+                    contato["empresa"] = org[0]
+            elif key == "title":
+                contato["cargo"] = str(vcard.contents[key][0].value)
+            elif key == "note":
+                contato["notas"] = str(vcard.contents[key][0].value)
+            elif key == "bday":
+                contato["aniversario"] = str(vcard.contents[key][0].value)
+            elif "x-socialprofile" in key:
+                value = vcard.contents[key][0].value
+                if "linkedin" in value.lower():
+                    if not value.startswith("http"):
+                        value = value.replace("x-", "").strip().replace(":", "")
+                        contato["linkedin"] = f"https://www.linkedin.com/in/{value}"
+                    else:
+                        contato["linkedin"] = value
 
-            # Telefones
-            contato["telefones"] = []
-            if hasattr(vcard, "tel_list"):
-                for tel in vcard.tel_list:
-                    contato["telefones"].append(tel.value)
+        contatos.append(contato)
 
-            # Emails
-            contato["emails"] = []
-            if hasattr(vcard, "email_list"):
-                for email in vcard.email_list:
-                    contato["emails"].append(email.value)
-
-            # Endereços
-            if hasattr(vcard, "adr"):
-                contato["endereco"] = " ".join([s for s in vcard.adr.value if s])
-            else:
-                contato["endereco"] = None
-
-            # Organização e cargo
-            contato["empresa"] = getattr(vcard, "org", None).value[0] if hasattr(vcard, "org") else None
-            contato["cargo"] = getattr(vcard, "title", None).value if hasattr(vcard, "title") else None
-
-            # Notas
-            contato["notas"] = getattr(vcard, "note", None).value if hasattr(vcard, "note") else None
-
-            # Aniversário
-            contato["aniversario"] = getattr(vcard, "bday", None).value if hasattr(vcard, "bday") else None
-
-            # Redes sociais (com foco em LinkedIn)
-            contato["linkedin"] = None
-            if hasattr(vcard, "url_list"):
-                for url in vcard.url_list:
-                    link = url.value.strip()
-                    if "linkedin" in link:
-                        if not link.startswith("http"):
-                            link = f"https://www.linkedin.com/in/{link}"
-                        contato["linkedin"] = link
-                        break
-
-            contatos.append(contato)
-        except Exception as e:
-            print(f"Erro ao processar vCard: {e}")
     return contatos
 
-def buscar_por_nome(nome_busca):
-    vcards = get_contacts_raw()
-    contatos = parse_vcards(vcards)
-    nome_busca_normalizado = nome_busca.lower()
-    return [
-        c for c in contatos
-        if c["nome_completo"] and nome_busca_normalizado in c["nome_completo"].lower()
-        or (c.get("apelido") and nome_busca_normalizado in c["apelido"].lower())
-    ]
+def buscar_por_nome(vcards, nome_busca):
+    nome_busca = nome_busca.lower()
+    encontrados = []
+
+    for vcard in vcards:
+        nome = vcard.fn.value.lower() if hasattr(vcard, 'fn') else ''
+        apelido = getattr(vcard, 'nickname', None)
+        apelido = apelido.value.lower() if apelido else ''
+
+        if nome_busca in nome or nome_busca in apelido:
+            encontrados.append(vcard)
+
+    return encontrados
