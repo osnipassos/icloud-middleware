@@ -2,76 +2,76 @@ import os
 import re
 from urllib.parse import unquote
 from vobject import readOne
-from carddav import CardDAVClient
+from caldav import DAVClient as CardDAVClient  # ✅ Corrigido
 
-CARD_DAV_URL = os.getenv("CARD_DAV_URL")
 APPLE_ID = os.getenv("APPLE_ID")
 APPLE_APP_PASSWORD = os.getenv("APPLE_APP_PASSWORD")
-APPLE_CONTACTS_ID = os.getenv("APPLE_CONTACTS_ID")
-CARD_DAV_HOME = f"{CARD_DAV_URL}/{APPLE_CONTACTS_ID}/card/"
+CARD_DAV_URL = os.getenv("CARD_DAV_URL")
 
 def normalizar_nome(nome):
-    return re.sub(r'[^a-zA-Z0-9]', ' ', nome).strip().lower()
+    if not nome:
+        return ""
+    nome = nome.lower()
+    nome = re.sub(r"[^a-zA-Z0-9\s]", "", nome)
+    return nome.strip()
+
+def conectar_carddav():
+    if not (APPLE_ID and APPLE_APP_PASSWORD and CARD_DAV_URL):
+        raise Exception("Variáveis de ambiente não configuradas corretamente")
+    return CardDAVClient(
+        url=CARD_DAV_URL,
+        username=APPLE_ID,
+        password=APPLE_APP_PASSWORD
+    )
 
 def get_contacts_raw():
-    client = CardDAVClient(CARD_DAV_URL)
-    client.set_basic_auth(APPLE_ID, APPLE_APP_PASSWORD)
     try:
-        return client.find_resources(url=CARD_DAV_HOME)
+        client = conectar_carddav()
+        principal = client.principal()
+        addressbooks = principal.addressbooks()
+        all_vcards = []
+        for book in addressbooks:
+            vcards = book.cards()
+            all_vcards.extend(vcards)
+        return all_vcards
     except Exception as e:
-        raise Exception({
-            "erro": "Erro no REPORT",
-            "status": 400,
-            "request_url": CARD_DAV_HOME,
-            "request_headers": {
-                "Content-Type": "application/xml; charset=utf-8",
-                "Depth": "1"
-            },
-            "response_headers": getattr(e, 'response_headers', {}),
-            "body": str(e)
-        })
+        return {"erro": str(e)}
 
-def parse_vcards(resources):
+def parse_vcards(raw_vcards):
     contatos = []
-    for res in resources:
+    for vcard in raw_vcards:
         try:
-            vcard = readOne(res.data.decode())
-            contato = {
-                "nome": getattr(vcard, 'fn', None).value if hasattr(vcard, 'fn') else None,
-                "nome_normalizado": normalizar_nome(getattr(vcard, 'fn', None).value if hasattr(vcard, 'fn') else ""),
-                "email": getattr(vcard, 'email', None).value if hasattr(vcard, 'email') else None,
-                "telefone": getattr(vcard, 'tel', None).value if hasattr(vcard, 'tel') else None,
-                "empresa": getattr(vcard, 'org', None).value[0] if hasattr(vcard, 'org') else None,
-                "cargo": getattr(vcard, 'title', None).value if hasattr(vcard, 'title') else None,
-                "aniversario": (
-                    vcard.bday.value.isoformat()
-                    if hasattr(vcard, 'bday') and hasattr(vcard.bday.value, 'isoformat')
-                    else vcard.bday.value if hasattr(vcard, 'bday') else None
-                ),
-                "endereco": (
-                    " ".join([part for part in vcard.adr.value if part])
-                    if hasattr(vcard, 'adr') and hasattr(vcard.adr, 'value') else None
-                ),
-                "linkedin": next((u.value for u in getattr(vcard, 'url', []) if "linkedin" in u.value.lower()), None)
-                    if hasattr(vcard, 'url') else None,
-                "datas": []
-            }
+            v = readOne(vcard.vcard)
+            contato = {}
+            contato["nome"] = str(v.fn.value) if hasattr(v, "fn") else None
+            contato["nome_normalizado"] = normalizar_nome(contato["nome"])
+            contato["email"] = str(v.email.value) if hasattr(v, "email") else None
+            contato["telefone"] = str(v.tel.value) if hasattr(v, "tel") else None
+            contato["empresa"] = str(v.org.value[0]) if hasattr(v, "org") else None
+            contato["cargo"] = str(v.title.value) if hasattr(v, "title") else None
+            contato["aniversario"] = v.bday.value.isoformat() if hasattr(v, "bday") and hasattr(v.bday.value, "isoformat") else str(v.bday.value) if hasattr(v, "bday") else None
+            contato["endereco"] = str(v.adr.value) if hasattr(v, "adr") else None
+            contato["linkedin"] = str(v.linkedin.value) if hasattr(v, "linkedin") else None
+            contato["notas"] = str(v.note.value) if hasattr(v, "note") else None
 
-            if hasattr(vcard, 'x-abdate'):
-                if isinstance(vcard.contents.get('x-abdate', []), list):
-                    for data_item in vcard.contents.get('x-abdate', []):
-                        label = data_item.params.get('X-ABLabel', [''])[0] if data_item.params else ''
-                        contato["datas"].append({
-                            "label": label,
-                            "data": data_item.value
-                        })
+            datas = []
+            for attr in v.getChildren():
+                if attr.name == "X-APPLE-DATE":
+                    datas.append({
+                        "label": attr.params.get("X-APPLE-LABEL", [""])[0],
+                        "data": str(attr.value)
+                    })
+            contato["datas"] = datas if datas else None
+
             contatos.append(contato)
         except Exception as e:
             continue
     return contatos
 
-def buscar_por_nome(nome):
-    recursos = get_contacts_raw()
-    contatos = parse_vcards(recursos)
-    nome = normalizar_nome(nome)
-    return [c for c in contatos if nome in c["nome_normalizado"]]
+def buscar_por_nome(nome_busca):
+    vcards = get_contacts_raw()
+    if isinstance(vcards, dict) and "erro" in vcards:
+        return vcards
+    contatos = parse_vcards(vcards)
+    nome_normalizado = normalizar_nome(nome_busca)
+    return [c for c in contatos if nome_normalizado in c["nome_normalizado"]]
