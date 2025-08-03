@@ -1,47 +1,39 @@
 import os
-from fastapi import FastAPI, Request, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi.responses import JSONResponse
 from dotenv import load_dotenv
-from carddav import get_contacts_raw, parse_vcards, buscar_por_nome
+from carddav import get_contacts_raw, parse_vcards, normalizar_nome
 
 load_dotenv()
 
 API_TOKEN = os.getenv("API_TOKEN")
-PORT = int(os.getenv("PORT", 8000))
-
 app = FastAPI()
 
-# CORS
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+
+def validar_token(token: str):
+    if token != API_TOKEN:
+        raise HTTPException(status_code=401, detail="Token inválido")
+
 
 @app.get("/contatos")
-def listar_contatos(request: Request):
-    autenticar(request)
-    raw, erro = get_contacts_raw()
-    if erro:
-        return erro
-    contatos = parse_vcards(raw)
-    return {"contatos": contatos}
+def listar_contatos(authorization: str = Header(None)):
+    validar_token(authorization.replace("Bearer ", ""))
+    try:
+        raw = get_contacts_raw()
+        contatos = parse_vcards(raw)
+        return {"contatos": contatos}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"erro": str(e)})
+
 
 @app.get("/contato")
-def buscar_contato(nome: str, request: Request):
-    autenticar(request)
-    raw, erro = get_contacts_raw()
-    if erro:
-        return erro
-    contatos = parse_vcards(raw)
-    resultados = buscar_por_nome(nome, contatos)
-    return {"contatos": resultados}
-
-def autenticar(request: Request):
-    auth = request.headers.get("Authorization")
-    if not auth or not auth.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Token ausente")
-    token = auth.split(" ")[1]
-    if token != API_TOKEN:
-        raise HTTPException(status_code=403, detail="Token inválido")
+def buscar_contato(nome: str, authorization: str = Header(None)):
+    validar_token(authorization.replace("Bearer ", ""))
+    try:
+        raw = get_contacts_raw()
+        todos = parse_vcards(raw)
+        termo = normalizar_nome(nome)
+        filtrados = [c for c in todos if termo in c.get("nome_normalizado", "")]
+        return {"contatos": filtrados}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"erro": str(e)})
