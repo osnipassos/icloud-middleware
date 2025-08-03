@@ -1,18 +1,23 @@
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse
-from carddav import get_contacts_raw, parse_vcards, find_contacts_by_name
+from carddav import get_contacts_raw, parse_vcards, buscar_por_nome
 import os
 
 app = FastAPI()
 
-def check_auth(request: Request):
-    token = request.headers.get("Authorization", "")
-    if token != "Bearer mellro_super_token_123":
-        raise HTTPException(status_code=401, detail="Unauthorized")
+# Token fixo de autenticação (simples para dev, substitua por algo mais seguro em produção)
+TOKEN = "mellro_super_token_123"
+
+@app.middleware("http")
+async def check_auth(request: Request, call_next):
+    if request.url.path.startswith("/contato") or request.url.path.startswith("/contatos"):
+        auth = request.headers.get("Authorization")
+        if auth != f"Bearer {TOKEN}":
+            return JSONResponse(status_code=401, content={"erro": "Não autorizado"})
+    return await call_next(request)
 
 @app.get("/contatos")
-async def listar_contatos(request: Request):
-    check_auth(request)
+def listar_todos():
     raw = get_contacts_raw()
     if isinstance(raw, dict) and "erro" in raw:
         return raw
@@ -20,11 +25,10 @@ async def listar_contatos(request: Request):
     return {"contatos": contatos}
 
 @app.get("/contato")
-async def buscar_contato(nome: str, request: Request):
-    check_auth(request)
+def buscar(nome: str):
     raw = get_contacts_raw()
     if isinstance(raw, dict) and "erro" in raw:
         return raw
     contatos = parse_vcards(raw)
-    encontrados = find_contacts_by_name(nome, contatos)
+    encontrados = buscar_por_nome(nome, contatos)
     return {"contatos": encontrados}

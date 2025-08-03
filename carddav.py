@@ -1,9 +1,10 @@
 import os
 import requests
-import vobject
 import re
+import vobject
 from unidecode import unidecode
-from base64 import b64encode
+from datetime import datetime
+
 
 def get_contacts_raw():
     url = os.environ.get("CARD_DAV_URL")
@@ -11,110 +12,130 @@ def get_contacts_raw():
         return {"erro": "CARD_DAV_URL não configurada"}
 
     auth = (os.environ.get("APPLE_ID"), os.environ.get("APPLE_APP_PASSWORD"))
-    if not all(auth):
-        return {"erro": "Credenciais não configuradas"}
-
     headers = {
         "Content-Type": "application/xml; charset=utf-8",
         "Depth": "1",
     }
-
-    body = """<?xml version="1.0" encoding="UTF-8"?>
+    body = """<?xml version="1.0" encoding="utf-8" ?>
     <A:propfind xmlns:A="DAV:">
       <A:prop>
         <A:getetag/>
+        <A:getcontenttype/>
       </A:prop>
     </A:propfind>"""
 
-    resp = requests.request("REPORT", url, headers=headers, data=body, auth=auth)
-    if resp.status_code != 207:
-        return {
-            "erro": "Erro no REPORT",
-            "status": resp.status_code,
-            "request_url": url,
-            "request_headers": headers,
-            "response_headers": dict(resp.headers),
-            "body": resp.text
-        }
+    try:
+        response = requests.request("REPORT", url, data=body, headers=headers, auth=auth)
+        if response.status_code != 207:
+            return {
+                "erro": "Erro no REPORT",
+                "status": response.status_code,
+                "request_url": url,
+                "request_headers": headers,
+                "response_headers": dict(response.headers),
+                "body": response.text
+            }
 
-    vcards = []
-    for href in re.findall(r"<D:href>(.*?)</D:href>", resp.text):
-        if not href.endswith(".vcf"):
-            continue
-        card_url = f"https://contacts.icloud.com{href}"
-        card_resp = requests.get(card_url, auth=auth)
-        if card_resp.ok:
-            vcards.append(card_resp.text)
-
-    return vcards
+        urls = re.findall(r"https?://[^\s\"']+", response.text)
+        vcards = []
+        for u in urls:
+            if u.endswith(".vcf"):
+                vcard_resp = requests.get(u, auth=auth)
+                if vcard_resp.status_code == 200:
+                    vcards.append(vcard_resp.text)
+        return vcards
+    except Exception as e:
+        return {"erro": str(e)}
 
 
 def parse_vcards(vcards):
     contatos = []
-    for vcard_str in vcards:
+
+    for vcard_text in vcards:
         try:
-            vcard = vobject.readOne(vcard_str)
+            vcard = vobject.readOne(vcard_text)
             contato = {}
 
-            if hasattr(vcard, 'fn'):
-                contato['nome'] = vcard.fn.value
-                contato['nome_normalizado'] = unidecode(vcard.fn.value.lower())
+            # Nome
+            if hasattr(vcard, "fn"):
+                contato["nome"] = vcard.fn.value
+                contato["nome_normalizado"] = unidecode(vcard.fn.value.lower())
 
-            if hasattr(vcard, 'email'):
-                contato['email'] = vcard.email.value
+            # Telefones
+            if hasattr(vcard, "tel_list") and vcard.tel_list:
+                contato["telefone"] = vcard.tel_list[0].value
 
-            if hasattr(vcard, 'tel'):
-                contato['telefone'] = vcard.tel.value
+            # Email
+            if hasattr(vcard, "email_list") and vcard.email_list:
+                contato["email"] = vcard.email_list[0].value
 
-            if hasattr(vcard, 'org'):
-                contato['empresa'] = ";".join(vcard.org.value)
+            # Empresa e cargo
+            if hasattr(vcard, "org"):
+                contato["empresa"] = vcard.org.value[0]
+            if hasattr(vcard, "title"):
+                contato["cargo"] = vcard.title.value
 
-            if hasattr(vcard, 'title'):
-                contato['cargo'] = vcard.title.value
+            # Endereço
+            if hasattr(vcard, "adr_list") and vcard.adr_list:
+                adr = vcard.adr_list[0]
+                endereco = ", ".join(filter(None, [
+                    adr.street, adr.city, adr.region, adr.code, adr.country
+                ]))
+                contato["endereco"] = endereco
 
-            if hasattr(vcard, 'bday'):
-                contato['aniversario'] = str(vcard.bday.value)
+            # Aniversário
+            if hasattr(vcard, "bday"):
+                contato["aniversario"] = vcard.bday.value.isoformat()
 
-            if hasattr(vcard, 'note'):
-                contato['notas'] = vcard.note.value
+            # Notas
+            if hasattr(vcard, "note"):
+                contato["notas"] = vcard.note.value
 
-            if hasattr(vcard, 'adr'):
-                contato['endereco'] = " ".join(vcard.adr.value)
+            # Redes sociais (heurística via notas ou campos X-)
+            redes = []
+            linkedin = None
+            for line in vcard_text.splitlines():
+                if "linkedin.com/in/" in line:
+                    linkedin = re.search(r"https?://[^\s]+", line)
+                    if linkedin:
+                        linkedin = linkedin.group(0)
+                if "instagram.com" in line or "twitter.com" in line or "facebook.com" in line:
+                    match = re.search(r"https?://[^\s]+", line)
+                    if match:
+                        redes.append(match.group(0))
 
-            # Redes sociais e datas customizadas
-            contato['linkedin'] = None
-            contato['redes'] = None
-            contato['datas'] = []
+            if linkedin:
+                contato["linkedin"] = linkedin
+            if redes:
+                contato["redes"] = redes
 
-            if hasattr(vcard, 'x_socialprofile'):
-                contato['redes'] = vcard.x_socialprofile.value
-
-            for attr in vcard.contents.get('x-abdate', []):
-                data_val = attr.value.isoformat() if hasattr(attr.value, 'isoformat') else str(attr.value)
-                contato['datas'].append({"data": data_val, "label": attr.params.get("X-ABLABEL", [""])[0]})
+            # Datas (X-APPLE-ABDATE, X-ANNIVERSARY, etc.)
+            datas = []
+            for line in vcard_text.splitlines():
+                if ":" in line and any(k in line for k in ["BDAY", "ANNIVERSARY", "X-ABDATE", "X-APPLE-ABDATE"]):
+                    try:
+                        label, data = line.split(":", 1)
+                        data = data.strip()
+                        if re.match(r"^\d{4}-\d{2}-\d{2}$", data):
+                            datas.append({"label": label.strip(), "data": data})
+                    except Exception:
+                        pass
+            if datas:
+                contato["datas"] = datas
 
             contatos.append(contato)
+
         except Exception as e:
-            continue
+            contatos.append({"erro": str(e)})
+
     return contatos
 
 
-def find_contacts_by_name(nome_busca, contatos):
-    nome_busca_normalizado = unidecode(nome_busca.strip().lower())
-
-    encontrados = []
+def buscar_por_nome(nome_parcial, contatos):
+    termo = unidecode(nome_parcial.lower())
+    resultados = []
     for contato in contatos:
-        campos = [
-            contato.get("nome", ""),
-            contato.get("email", ""),
-            contato.get("telefone", ""),
-            contato.get("empresa", ""),
-            contato.get("cargo", "")
-        ]
-        texto = " ".join(campos)
-        texto_normalizado = unidecode(texto.lower())
-
-        if nome_busca_normalizado in texto_normalizado:
-            encontrados.append(contato)
-
-    return encontrados
+        nome_normalizado = contato.get("nome_normalizado", "")
+        if termo in nome_normalizado or any(termo in t for t in nome_normalizado.split()):
+            resultados.append(contato)
+    return resultados
