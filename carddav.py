@@ -1,134 +1,105 @@
 import os
-import re
 import requests
 import vobject
-from requests.auth import HTTPBasicAuth
 from unidecode import unidecode
-from dotenv import load_dotenv
 
-load_dotenv()
-
-APPLE_ID = os.getenv("APPLE_ID")
-APPLE_APP_PASSWORD = os.getenv("APPLE_APP_PASSWORD")
-CARD_DAV_URL = os.getenv("CARD_DAV_URL")
+CARD_DAV_URL = os.environ.get("CARD_DAV_URL")
+APPLE_ID = os.environ.get("APPLE_ID")
+APPLE_APP_PASSWORD = os.environ.get("APPLE_APP_PASSWORD")
 
 def normalizar_nome(nome):
-    return unidecode(nome).lower()
+    return unidecode(nome.lower())
 
 def get_contacts_raw():
-    if not CARD_DAV_URL:
-        return None, {"erro": "CARD_DAV_URL não configurada"}
-
+    auth = (APPLE_ID, APPLE_APP_PASSWORD)
     headers = {
-        "Content-Type": "application/xml; charset=utf-8",
         "Depth": "1",
+        "Content-Type": "application/xml; charset=utf-8",
     }
-
-    body = """
-    <A:propfind xmlns:A="DAV:">
-      <A:prop>
-        <A:getetag />
-        <A:address-data xmlns:A="urn:ietf:params:xml:ns:carddav" />
-      </A:prop>
-    </A:propfind>
-    """
-
+    body = """<?xml version="1.0" encoding="UTF-8"?>
+<card:addressbook-query xmlns:d="DAV:" xmlns:card="urn:ietf:params:xml:ns:carddav">
+  <d:prop>
+    <d:getetag/>
+    <card:address-data/>
+  </d:prop>
+</card:addressbook-query>
+"""
     response = requests.request(
         "REPORT",
         CARD_DAV_URL,
         headers=headers,
+        auth=auth,
         data=body,
-        auth=HTTPBasicAuth(APPLE_ID, APPLE_APP_PASSWORD)
     )
-
     if not response.ok:
-        return None, {
+        raise Exception({
             "erro": "Erro no REPORT",
             "status": response.status_code,
             "request_url": CARD_DAV_URL,
             "request_headers": headers,
             "response_headers": dict(response.headers),
-            "body": response.text
-        }
+            "body": response.text,
+        })
+    return response.text
 
-    return response.text, None
-
-def parse_vcards(xml_response):
-    vcards_raw = re.findall(r"BEGIN:VCARD.*?END:VCARD", xml_response, re.DOTALL)
+def parse_vcards(response_text):
     contatos = []
-
-    for vcard_text in vcards_raw:
-        try:
-            vcard = vobject.readOne(vcard_text)
-        except Exception:
-            continue
-
+    for vcard in vobject.readComponents(response_text):
         contato = {}
-        contato["nome"] = getattr(vcard, "fn", type("obj", (), {"value": None}))().value
-        contato["nome_normalizado"] = normalizar_nome(contato["nome"]) if contato["nome"] else None
 
-        contato["email"] = getattr(vcard, "email", type("obj", (), {"value": None}))().value
-        contato["telefone"] = getattr(vcard, "tel", type("obj", (), {"value": None}))().value
+        if hasattr(vcard, "fn"):
+            contato["nome"] = vcard.fn.value
+            contato["nome_normalizado"] = normalizar_nome(vcard.fn.value)
 
-        contato["empresa"] = getattr(vcard, "org", type("obj", (), {"value": None}))().value
-        if isinstance(contato["empresa"], list):
-            contato["empresa"] = " ".join(contato["empresa"])
+        if hasattr(vcard, "email"):
+            contato["email"] = vcard.email.value
 
-        contato["cargo"] = getattr(vcard, "title", type("obj", (), {"value": None}))().value
+        if hasattr(vcard, "tel"):
+            contato["telefone"] = vcard.tel.value
 
-        # aniversário
-        bday = getattr(vcard, "bday", None)
-        if bday:
-            contato["aniversario"] = bday.value.isoformat() if hasattr(bday.value, "isoformat") else str(bday.value)
+        if hasattr(vcard, "org"):
+            contato["empresa"] = " ".join(vcard.org.value)
 
-        # endereço
-        endereco = getattr(vcard, "adr", None)
-        if endereco:
-            parts = [
-                endereco.value.street,
-                endereco.value.city,
-                endereco.value.region,
-                endereco.value.code,
-                endereco.value.country
-            ]
-            contato["endereco"] = " ".join(filter(None, parts)).replace("  ", " ")
+        if hasattr(vcard, "title"):
+            contato["cargo"] = vcard.title.value
 
-        # datas (X-APPLE-DATE or similar)
-        datas = []
-        for attr in dir(vcard):
-            if attr.startswith("x_") and "date" in attr:
-                item = getattr(vcard, attr)
-                if hasattr(item, "value"):
-                    datas.append({"label": "", "data": str(item.value)})
-        contato["datas"] = datas if datas else None
+        if hasattr(vcard, "bday"):
+            try:
+                contato["aniversario"] = vcard.bday.value.isoformat()
+            except:
+                contato["aniversario"] = str(vcard.bday.value)
 
-        # redes sociais (X-SOCIALPROFILE)
-        redes = []
-        linkedin = None
-        for line in vcard.contents.get("x-socialprofile", []):
-            valor = str(line.value)
-            tipo = line.params.get("type", [""])[0].lower()
-            if "linkedin" in valor.lower() or tipo == "linkedin":
-                linkedin = valor
+        if hasattr(vcard, "note"):
+            contato["notas"] = vcard.note.value
+
+        if hasattr(vcard, "adr"):
+            try:
+                contato["endereco"] = " ".join(
+                    [x for x in vcard.adr.value.__dict__.values() if x]
+                )
+            except:
+                pass
+
+        # Extra: redes sociais (como linkedin), datas e urls extras
+        if hasattr(vcard, "url"):
+            url = vcard.url.value
+            if "linkedin" in url:
+                contato["linkedin"] = url
             else:
-                redes.append({"tipo": tipo, "url": valor})
-        contato["linkedin"] = linkedin
-        contato["redes"] = redes if redes else None
+                contato["site"] = url
+
+        datas = []
+        for attr in vcard.contents.get("x-abdate", []):
+            data_item = {"label": attr.params.get("X-ABLabel", [""])[0], "data": attr.value}
+            datas.append(data_item)
+        if datas:
+            contato["datas"] = datas
 
         contatos.append(contato)
-
     return contatos
 
-def buscar_por_nome(nome, contatos):
-    nome_busca = normalizar_nome(nome)
-    resultados = []
-    for contato in contatos:
-        nome_completo = contato.get("nome_normalizado", "")
-        if nome_busca in nome_completo:
-            resultados.append(contato)
-        else:
-            # busca por pedaços do nome
-            partes = nome_completo.split()
-            if any(nome_busca in parte for parte in partes):
-                resultados.append(contato)
-    return resultados
+def buscar_por_nome(nome_busca):
+    nome_busca_normalizado = normalizar_nome(nome_busca)
+    raw = get_contacts_raw()
+    contatos = parse_vcards(raw)
+    return [c for c in contatos if nome_busca_normalizado in c.get("nome_normalizado", "")]
