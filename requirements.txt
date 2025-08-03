@@ -6,3 +6,4 @@ unidecode
 vobject
 icalendar
 beautifulsoup4
+lxml
