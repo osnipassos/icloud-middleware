@@ -1,116 +1,126 @@
 import os
+import re
 import requests
-import base64
 import vobject
 from unidecode import unidecode
+from requests.auth import HTTPBasicAuth
 
-CARD_DAV_URL = os.getenv("CARD_DAV_URL")
-APPLE_ID = os.getenv("APPLE_ID")
-APPLE_APP_PASSWORD = os.getenv("APPLE_APP_PASSWORD")
+def normalize_nome(nome):
+    return unidecode(nome.strip().lower())
 
 def get_contacts_raw():
-    if not CARD_DAV_URL:
+    url = os.getenv("CARD_DAV_URL")
+    if not url:
         return {"erro": "CARD_DAV_URL não configurada"}
 
-    xml_body = """<?xml version="1.0" encoding="UTF-8"?>
-<C:addressbook-query xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:carddav">
-  <D:prop>
-    <D:getetag/>
-    <C:address-data/>
-  </D:prop>
-  <C:filter/>
-</C:addressbook-query>
-"""
-
-    auth = f"{APPLE_ID}:{APPLE_APP_PASSWORD}"
-    b64_auth = base64.b64encode(auth.encode()).decode()
-
+    auth = HTTPBasicAuth(os.getenv("APPLE_ID"), os.getenv("APPLE_APP_PASSWORD"))
     headers = {
-        "Content-Type": "application/xml; charset=utf-8",
         "Depth": "1",
-        "Authorization": f"Basic {b64_auth}",
+        "Content-Type": "application/xml; charset=utf-8",
     }
+    body = """<?xml version="1.0" encoding="UTF-8"?>
+<card:addressbook-query xmlns:d="DAV:" xmlns:card="urn:ietf:params:xml:ns:carddav">
+  <d:prop>
+    <d:getetag/>
+    <card:address-data/>
+  </d:prop>
+  <card:filter/>
+</card:addressbook-query>"""
 
     try:
-        response = requests.request(
-            "REPORT",
-            CARD_DAV_URL,
-            headers=headers,
-            data=xml_body.encode("utf-8"),
-        )
-        if response.status_code != 207:
-            return {
-                "erro": "Erro no REPORT",
-                "status": response.status_code,
-                "request_url": CARD_DAV_URL,
-                "request_headers": headers,
-                "response_headers": dict(response.headers),
-                "body": response.text,
-            }
-        return response.text
+        response = requests.request("REPORT", url, headers=headers, data=body, auth=auth)
     except Exception as e:
         return {"erro": str(e)}
 
-def parse_vcards(xml_data):
-    import xml.etree.ElementTree as ET
-    contatos = []
+    if not response.ok:
+        return {
+            "erro": "Erro no REPORT",
+            "status": response.status_code,
+            "request_url": url,
+            "request_headers": headers,
+            "response_headers": dict(response.headers),
+            "body": response.text
+        }
 
-    try:
-        root = ET.fromstring(xml_data)
-        for resp in root.findall(".//{DAV:}response"):
-            href = resp.find("{DAV:}href").text if resp.find("{DAV:}href") is not None else ""
-            prop = resp.find("{DAV:}propstat/{DAV:}prop", {"DAV": "DAV:"})
-            if prop is None:
-                continue
-            card = prop.find("{urn:ietf:params:xml:ns:carddav}address-data")
-            if card is None or not card.text:
-                continue
-            try:
-                vcard = vobject.readOne(card.text)
-                contato = {}
-                if hasattr(vcard, "fn"):
-                    contato["nome"] = vcard.fn.value
-                    contato["nome_normalizado"] = unidecode(vcard.fn.value.lower())
-                if hasattr(vcard, "email"):
-                    contato["email"] = vcard.email.value
-                if hasattr(vcard, "tel"):
-                    contato["telefone"] = vcard.tel.value
-                if hasattr(vcard, "org"):
-                    contato["empresa"] = ";".join(vcard.org.value)
-                if hasattr(vcard, "title"):
-                    contato["cargo"] = vcard.title.value
-                if hasattr(vcard, "url"):
-                    contato["linkedin"] = vcard.url.value if "linkedin.com" in vcard.url.value else None
-                    contato["redes"] = vcard.url.value if "linkedin.com" not in vcard.url.value else None
-                if hasattr(vcard, "note"):
-                    contato["notas"] = vcard.note.value
-                if hasattr(vcard, "bday"):
-                    contato["aniversario"] = vcard.bday.value
-                if hasattr(vcard, "adr"):
-                    endereco = vcard.adr.value
-                    contato["endereco"] = ", ".join(filter(None, [
-                        endereco.street, endereco.city, endereco.region,
-                        endereco.code, endereco.country
-                    ]))
-                contato["datas"] = []
-                for c in vcard.contents.get("x-abdate", []):
-                    contato["datas"].append({
-                        "label": c.params.get("X-ABLABEL", [""])[0],
-                        "data": c.value.isoformat() if hasattr(c.value, "isoformat") else str(c.value)
+    return response.text
+
+def parse_vcards(xml_data):
+    contatos = []
+    vcards = re.findall(r"BEGIN:VCARD.*?END:VCARD", xml_data, re.DOTALL)
+
+    for vcard_text in vcards:
+        try:
+            vcard = vobject.readOne(vcard_text)
+        except Exception:
+            continue
+
+        contato = {}
+        contato["nome"] = getattr(vcard, "fn", None).value if hasattr(vcard, "fn") else None
+        contato["nome_normalizado"] = normalize_nome(contato["nome"]) if contato["nome"] else None
+
+        contato["telefone"] = (
+            vcard.tel.value if hasattr(vcard, "tel") else None
+        )
+        contato["email"] = (
+            vcard.email.value if hasattr(vcard, "email") else None
+        )
+        contato["empresa"] = (
+            vcard.org.value[0] if hasattr(vcard, "org") else None
+        )
+        contato["cargo"] = (
+            vcard.title.value if hasattr(vcard, "title") else None
+        )
+        contato["aniversario"] = (
+            str(vcard.bday.value) if hasattr(vcard, "bday") else None
+        )
+        contato["nota"] = (
+            vcard.note.value if hasattr(vcard, "note") else None
+        )
+
+        # Endereço formatado
+        if hasattr(vcard, "adr"):
+            adr = vcard.adr.value
+            contato["endereco"] = ", ".join(
+                filter(None, [adr.street, adr.city, adr.region, adr.code, adr.country])
+            )
+
+        # Datas com label
+        datas = []
+        for key in vcard.contents:
+            if key.lower() == "x-abdate":
+                for d in vcard.contents[key]:
+                    label = d.params.get("x-ablabel", [""])[0]
+                    datas.append({
+                        "label": label,
+                        "data": str(d.value)
                     })
-                contatos.append(contato)
-            except Exception:
-                continue
-    except Exception as e:
-        return [{"erro": f"Falha ao processar XML: {str(e)}"}]
+        contato["datas"] = datas if datas else None
+
+        # LinkedIn e redes sociais
+        redes = []
+        linkedin = None
+        for key in vcard.contents:
+            if key.lower() == "x-socialprofile":
+                for s in vcard.contents[key]:
+                    tipo = s.params.get("type", [""])[0].lower()
+                    url = str(s.value)
+                    if "linkedin.com" in url or tipo == "linkedin":
+                        linkedin = url
+                    else:
+                        redes.append({"tipo": tipo, "url": url})
+        contato["linkedin"] = linkedin
+        contato["redes"] = redes if redes else None
+
+        contatos.append(contato)
 
     return contatos
 
-def buscar_por_nome(nome, contatos):
-    termo = unidecode(nome.lower())
-    return [
-        c for c in contatos
-        if termo in c.get("nome_normalizado", "")
-        or termo in c.get("email", "").lower()
-        or termo in c.get("telefone", "")
-    ]
+def buscar_por_nome(contatos, termo):
+    termo = normalize_nome(termo)
+    resultados = []
+    for contato in contatos:
+        if not contato["nome_normalizado"]:
+            continue
+        if all(palavra in contato["nome_normalizado"] for palavra in termo.split()):
+            resultados.append(contato)
+    return resultados
