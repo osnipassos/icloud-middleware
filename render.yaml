@@ -2,11 +2,16 @@ services:
   - type: web
     name: icloud-middleware
     env: python
-    plan: free
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn main:app --host 0.0.0.0 --port 10000
     envVars:
       - key: APPLE_ID
-        value: YOUR_ICLOUD_EMAIL
+        sync: true
       - key: APPLE_APP_PASSWORD
-        value: YOUR_APP_SPECIFIC_PASSWORD
+        sync: true
+      - key: APPLE_CONTACTS_ID
+        sync: true
+      - key: CARD_DAV_URL
+        sync: true
+      - key: API_TOKEN
+        sync: true
