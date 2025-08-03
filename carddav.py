@@ -3,124 +3,116 @@ import re
 import vobject
 import requests
 from requests.auth import HTTPBasicAuth
-from xml.etree import ElementTree as ET
-from unidecode import unidecode
 from datetime import datetime
 
-APPLE_ID = os.environ.get("APPLE_ID")
-APPLE_APP_PASSWORD = os.environ.get("APPLE_APP_PASSWORD")
-APPLE_CONTACTS_ID = os.environ.get("APPLE_CONTACTS_ID")
-CARD_DAV_URL = os.environ.get("CARD_DAV_URL")
+APPLE_ID = os.getenv("APPLE_ID")
+APPLE_APP_PASSWORD = os.getenv("APPLE_APP_PASSWORD")
+CARD_DAV_URL = os.getenv("CARD_DAV_URL")
 
-HEADERS = {
-    "Content-Type": "application/xml; charset=utf-8",
-    "Depth": "1"
-}
-
-REPORT_BODY = '''<?xml version="1.0" encoding="utf-8" ?>
-<card:addressbook-query xmlns:card="urn:ietf:params:xml:ns:carddav">
-  <prop xmlns="DAV:">
-    <getetag />
-    <address-data />
-  </prop>
-</card:addressbook-query>
-'''
+def normalizar_nome(nome):
+    return re.sub(r'\W+', ' ', nome).strip().lower()
 
 def get_contacts_raw():
+    if not CARD_DAV_URL:
+        return {"erro": "CARD_DAV_URL não configurada"}
+
+    headers = {
+        "Content-Type": "application/xml; charset=utf-8",
+        "Depth": "1",
+    }
+
+    data = """<?xml version="1.0" encoding="UTF-8"?>
+<card:addressbook-query xmlns:card="urn:ietf:params:xml:ns:carddav"
+  xmlns:d="DAV:">
+  <d:prop>
+    <d:getetag/>
+    <card:address-data/>
+  </d:prop>
+</card:addressbook-query>"""
+
     try:
         response = requests.request(
-            method="REPORT",
-            url=CARD_DAV_URL,
-            headers=HEADERS,
-            data=REPORT_BODY,
-            auth=HTTPBasicAuth(APPLE_ID, APPLE_APP_PASSWORD)
+            "REPORT",
+            CARD_DAV_URL,
+            headers=headers,
+            data=data.encode("utf-8"),
+            auth=HTTPBasicAuth(APPLE_ID, APPLE_APP_PASSWORD),
         )
 
         if response.status_code != 207:
-            return {"erro": "Erro no REPORT", "status": response.status_code, "request_url": CARD_DAV_URL, "request_headers": HEADERS, "response_headers": dict(response.headers), "body": response.text}
+            return {
+                "erro": "Erro no REPORT",
+                "status": response.status_code,
+                "request_url": CARD_DAV_URL,
+                "request_headers": headers,
+                "response_headers": dict(response.headers),
+                "body": response.text,
+            }
 
-        tree = ET.fromstring(response.content)
-        vcards = []
-        for response_el in tree.findall(".//{DAV:}response"):
-            vcard_data_el = response_el.find(".//{urn:ietf:params:xml:ns:carddav}address-data")
-            if vcard_data_el is not None and vcard_data_el.text:
-                vcards.append(vcard_data_el.text)
-
-        return vcards
+        return response.text
 
     except Exception as e:
         return {"erro": str(e)}
 
-def parse_vcards(vcards):
+def parse_vcards(multivcard):
     contatos = []
-    for vcard_raw in vcards:
-        try:
-            vcard = vobject.readOne(vcard_raw)
-            contato = {}
-            contato["nome"] = vcard.fn.value
-            contato["nome_normalizado"] = unidecode(contato["nome"]).lower()
-            contato["email"] = getattr(vcard, "email", None).value if hasattr(vcard, "email") else None
-            contato["telefone"] = getattr(vcard, "tel", None).value if hasattr(vcard, "tel") else None
-            contato["empresa"] = getattr(vcard, "org", None).value[0] if hasattr(vcard, "org") else None
-            contato["cargo"] = getattr(vcard, "title", None).value if hasattr(vcard, "title") else None
+    if not multivcard:
+        return contatos
 
-            # Aniversário
-            if hasattr(vcard, "bday"):
-                bday = vcard.bday.value
-                if isinstance(bday, datetime):
-                    contato["aniversario"] = bday.date().isoformat()
-                elif isinstance(bday, str):
-                    try:
-                        contato["aniversario"] = datetime.fromisoformat(bday).date().isoformat()
-                    except Exception:
-                        contato["aniversario"] = bday
+    for vcard in vobject.readComponents(multivcard):
+        contato = {}
+        contato["nome"] = vcard.fn.value if hasattr(vcard, 'fn') else ""
+        contato["nome_normalizado"] = normalizar_nome(contato["nome"])
+        contato["email"] = vcard.email.value if hasattr(vcard, 'email') else ""
+        contato["telefone"] = vcard.tel.value if hasattr(vcard, 'tel') else ""
+        contato["empresa"] = vcard.org.value[0] if hasattr(vcard, 'org') else ""
+        contato["cargo"] = vcard.title.value if hasattr(vcard, 'title') else ""
+        contato["notas"] = vcard.note.value if hasattr(vcard, 'note') else ""
+        contato["linkedin"] = None
+        contato["redes"] = []
 
-            # Endereço
-            if hasattr(vcard, "adr"):
+        if hasattr(vcard, 'url'):
+            url_val = vcard.url.value
+            if 'linkedin' in url_val:
+                contato["linkedin"] = url_val
+            else:
+                contato["redes"].append(url_val)
+
+        if hasattr(vcard, 'bday'):
+            try:
+                contato["aniversario"] = vcard.bday.value.isoformat()
+            except Exception:
+                contato["aniversario"] = vcard.bday.value
+
+        if hasattr(vcard, 'adr'):
+            try:
                 adr = vcard.adr.value
-                endereco = ", ".join([str(field) for field in adr if field])
-                contato["endereco"] = endereco
+                contato["endereco"] = " ".join(filter(None, [
+                    adr.street, adr.city, adr.region, adr.code, adr.country
+                ]))
+            except Exception:
+                contato["endereco"] = str(vcard.adr.value)
 
-            # Notas
-            if hasattr(vcard, "note"):
-                contato["notas"] = vcard.note.value
+        contato["datas"] = []
+        for attr in vcard.contents.get("x-abdate", []):
+            try:
+                data_str = attr.value
+                data_formatada = datetime.strptime(data_str, "%Y-%m-%d").date().isoformat()
+                label = attr.params.get("x-ablabel", [""])[0]
+                contato["datas"].append({"label": label, "data": data_formatada})
+            except Exception:
+                continue
 
-            # URLs personalizadas
-            contato["linkedin"] = None
-            contato["redes"] = []
-            if hasattr(vcard, "url"):
-                urls = vcard.contents.get("url", [])
-                for u in urls:
-                    url = u.value
-                    if "linkedin.com" in url:
-                        contato["linkedin"] = url
-                    else:
-                        contato["redes"].append(url)
-
-            # Datas extras
-            contato["datas"] = []
-            for key, content_list in vcard.contents.items():
-                if key.startswith("x-") and any("date" in key.lower() for key in u.params.keys() for u in content_list):
-                    for item in content_list:
-                        data = item.value
-                        label = item.params.get("LABEL", [""])[0] if "LABEL" in item.params else ""
-                        if isinstance(data, datetime):
-                            contato["datas"].append({"label": label, "data": data.date().isoformat()})
-                        else:
-                            contato["datas"].append({"label": label, "data": str(data)})
-
-            contatos.append(contato)
-        except Exception:
-            continue
+        contatos.append(contato)
 
     return contatos
 
-def buscar_por_nome(nome):
-    nome_normalizado = unidecode(nome).lower()
-    vcards = get_contacts_raw()
-    if isinstance(vcards, dict) and "erro" in vcards:
-        return vcards
+def buscar_por_nome(vc_cards, termo):
+    termo_normalizado = normalizar_nome(termo)
+    contatos_filtrados = []
 
-    contatos = parse_vcards(vcards)
-    resultado = [c for c in contatos if nome_normalizado in c["nome_normalizado"]]
-    return resultado
+    for contato in parse_vcards(vc_cards):
+        if termo_normalizado in contato["nome_normalizado"]:
+            contatos_filtrados.append(contato)
+
+    return contatos_filtrados

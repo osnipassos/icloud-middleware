@@ -1,42 +1,32 @@
-import os
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import JSONResponse
-from fastapi.middleware.cors import CORSMiddleware
 from carddav import get_contacts_raw, buscar_por_nome, parse_vcards
+import os
 
-API_TOKEN = os.environ.get("API_TOKEN")
-
+API_TOKEN = os.getenv("API_TOKEN")
 app = FastAPI()
 
-# Middleware CORS (opcional, mas útil se for integrar com front-end)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-def autenticar(request: Request):
-    token = request.headers.get("Authorization", "").replace("Bearer ", "")
+def verificar_token(authorization: str = Header(None)):
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Token ausente ou inválido")
+    token = authorization.split(" ")[1]
     if token != API_TOKEN:
-        raise HTTPException(status_code=401, detail="Não autorizado")
-
-@app.get("/contato")
-def buscar_contato(nome: str, request: Request):
-    autenticar(request)
-    try:
-        raw = get_contacts_raw()
-        contatos = buscar_por_nome(raw, nome)
-        return {"contatos": contatos}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=403, detail="Token inválido")
 
 @app.get("/contatos")
-def listar_todos_contatos(request: Request):
-    autenticar(request)
-    try:
-        raw = get_contacts_raw()
-        contatos = parse_vcards(raw)
-        return {"contatos": contatos}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+def listar_contatos(authorization: str = Header(None)):
+    verificar_token(authorization)
+    raw = get_contacts_raw()
+    if isinstance(raw, dict) and "erro" in raw:
+        return JSONResponse(content={"erro": raw}, status_code=500)
+    contatos = parse_vcards(raw)
+    return {"contatos": contatos}
+
+@app.get("/contato")
+def buscar_contato(nome: str, authorization: str = Header(None)):
+    verificar_token(authorization)
+    raw = get_contacts_raw()
+    if isinstance(raw, dict) and "erro" in raw:
+        return JSONResponse(content={"erro": raw}, status_code=500)
+    contatos = buscar_por_nome(raw, nome)
+    return {"contatos": contatos}
