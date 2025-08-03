@@ -1,39 +1,42 @@
 import os
-from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse
-from dotenv import load_dotenv
-from carddav import get_contacts_raw, parse_vcards, normalizar_nome
+from fastapi.middleware.cors import CORSMiddleware
+from carddav import get_contacts_raw, buscar_por_nome, parse_vcards
 
-load_dotenv()
+API_TOKEN = os.environ.get("API_TOKEN")
 
-API_TOKEN = os.getenv("API_TOKEN")
 app = FastAPI()
 
+# Middleware CORS (opcional, mas útil se for integrar com front-end)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-def validar_token(token: str):
+def autenticar(request: Request):
+    token = request.headers.get("Authorization", "").replace("Bearer ", "")
     if token != API_TOKEN:
-        raise HTTPException(status_code=401, detail="Token inválido")
+        raise HTTPException(status_code=401, detail="Não autorizado")
 
+@app.get("/contato")
+def buscar_contato(nome: str, request: Request):
+    autenticar(request)
+    try:
+        raw = get_contacts_raw()
+        contatos = buscar_por_nome(raw, nome)
+        return {"contatos": contatos}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/contatos")
-def listar_contatos(authorization: str = Header(None)):
-    validar_token(authorization.replace("Bearer ", ""))
+def listar_todos_contatos(request: Request):
+    autenticar(request)
     try:
         raw = get_contacts_raw()
         contatos = parse_vcards(raw)
         return {"contatos": contatos}
     except Exception as e:
-        return JSONResponse(status_code=500, content={"erro": str(e)})
-
-
-@app.get("/contato")
-def buscar_contato(nome: str, authorization: str = Header(None)):
-    validar_token(authorization.replace("Bearer ", ""))
-    try:
-        raw = get_contacts_raw()
-        todos = parse_vcards(raw)
-        termo = normalizar_nome(nome)
-        filtrados = [c for c in todos if termo in c.get("nome_normalizado", "")]
-        return {"contatos": filtrados}
-    except Exception as e:
-        return JSONResponse(status_code=500, content={"erro": str(e)})
+        raise HTTPException(status_code=500, detail=str(e))
