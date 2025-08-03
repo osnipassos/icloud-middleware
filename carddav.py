@@ -1,141 +1,133 @@
 import os
 import requests
+import vobject
 import base64
-import xml.etree.ElementTree as ET
 import re
-from datetime import datetime
 from unidecode import unidecode
 
-def get_contacts_raw():
-    apple_id = os.getenv("APPLE_ID")
-    app_password = os.getenv("APPLE_APP_PASSWORD")
-    carddav_url = os.getenv("CARD_DAV_URL")
+APPLE_ID = os.getenv("APPLE_ID")
+APPLE_APP_PASSWORD = os.getenv("APPLE_APP_PASSWORD")
+CARD_DAV_URL = os.getenv("CARD_DAV_URL")
 
-    if not carddav_url:
+HEADERS = {
+    "Depth": "1",
+    "Content-Type": "application/xml; charset=utf-8"
+}
+
+def get_auth():
+    if not APPLE_ID or not APPLE_APP_PASSWORD:
+        return None
+    userpass = f"{APPLE_ID}:{APPLE_APP_PASSWORD}"
+    token = base64.b64encode(userpass.encode()).decode("utf-8")
+    return f"Basic {token}"
+
+def get_contacts_raw():
+    if not CARD_DAV_URL:
         return {"erro": "CARD_DAV_URL não configurada"}
 
-    auth_string = f"{apple_id}:{app_password}"
-    encoded_auth = base64.b64encode(auth_string.encode("utf-8")).decode("utf-8")
-
-    headers = {
-        "Content-Type": "application/xml; charset=utf-8",
-        "Depth": "1",
-        "Authorization": f"Basic {encoded_auth}"
-    }
-
-    body = """<?xml version="1.0" encoding="utf-8" ?>
-    <C:addressbook-query xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:carddav">
+    body = """<?xml version='1.0' encoding='utf-8' ?>
+    <C:addressbook-query xmlns:D='DAV:' xmlns:C='urn:ietf:params:xml:ns:carddav'>
       <D:prop>
         <D:getetag/>
         <C:address-data/>
       </D:prop>
-      <C:filter>
-        <C:prop-filter name="FN"/>
-      </C:filter>
-    </C:addressbook-query>
-    """
+      <C:filter/>
+    </C:addressbook-query>"""
 
     try:
-        response = requests.request("REPORT", carddav_url, headers=headers, data=body)
+        response = requests.request(
+            "REPORT",
+            CARD_DAV_URL,
+            headers={**HEADERS, "Authorization": get_auth()},
+            data=body
+        )
         if response.status_code != 207:
             return {
                 "erro": "Erro no REPORT",
                 "status": response.status_code,
-                "request_url": carddav_url,
-                "request_headers": headers,
+                "request_url": CARD_DAV_URL,
+                "request_headers": HEADERS,
                 "response_headers": dict(response.headers),
                 "body": response.text
             }
 
-        return response.text
+        return parse_vcards(response.text)
     except Exception as e:
-        return {"erro": "Exceção no REPORT", "detalhes": str(e)}
+        return {"erro": str(e)}
+
+def extract_linkedin(note):
+    match = re.search(r"https?://(www\.)?linkedin\.com/in/[\w\-]+", note or "")
+    return match.group(0) if match else None
+
+def extract_redes(vcard):
+    redes = []
+    for attr in vcard.contents.get("x-socialprofile", []):
+        redes.append(attr.value)
+    return redes or None
+
+def extract_datas(vcard):
+    datas = []
+    for key, field in vcard.contents.items():
+        if key.lower() in ["x-abdate", "x-abevent", "x-abdate1", "x-abdate2"]:
+            for entry in field:
+                datas.append({
+                    "data": str(entry.value),
+                    "label": entry.params.get("X-ABLabel", [key])[0]
+                })
+    return datas or None
+
+def extract_endereco(vcard):
+    enderecos = []
+    for adr in vcard.contents.get("adr", []):
+        endereco = {
+            "rua": adr.value.street,
+            "cidade": adr.value.city,
+            "estado": adr.value.region,
+            "cep": adr.value.code,
+            "pais": adr.value.country
+        }
+        enderecos.append(endereco)
+    return enderecos or None
 
 def parse_vcards(multistatus_xml):
+    vcards = re.findall(r"BEGIN:VCARD.*?END:VCARD", multistatus_xml, re.DOTALL)
     contatos = []
-    try:
-        root = ET.fromstring(multistatus_xml)
-        for response in root.findall("{DAV:}response"):
-            card = response.find(".//{urn:ietf:params:xml:ns:carddav}address-data")
-            if card is not None and card.text:
-                contato = extrair_dados_vcard(card.text)
-                if contato:
-                    contatos.append(contato)
-    except ET.ParseError:
-        pass
-    return contatos
 
-def extrair_dados_vcard(vcard_text):
-    contato = {}
-    redes = {}
-    datas = []
+    for vcard_str in vcards:
+        try:
+            vcard = vobject.readOne(vcard_str)
+            nome = getattr(vcard, "fn", None)
+            email = getattr(vcard, "email", None)
+            telefone = getattr(vcard, "tel", None)
+            org = getattr(vcard, "org", None)
+            title = getattr(vcard, "title", None)
+            note = getattr(vcard, "note", None)
+            bday = getattr(vcard, "bday", None)
 
-    lines = vcard_text.splitlines()
-    for line in lines:
-        line = line.strip()
-
-        if line.startswith("FN:"):
-            contato["nome"] = line.replace("FN:", "").strip()
-            contato["nome_normalizado"] = unidecode(contato["nome"].lower())
-        elif line.startswith("ORG:"):
-            contato["empresa"] = line.replace("ORG:", "").strip()
-        elif line.startswith("TITLE:"):
-            contato["cargo"] = line.replace("TITLE:", "").strip()
-        elif line.startswith("EMAIL"):
-            partes = line.split(":")
-            if len(partes) == 2:
-                contato["email"] = partes[1].strip()
-        elif line.startswith("TEL"):
-            partes = line.split(":")
-            if len(partes) == 2:
-                contato["telefone"] = partes[1].strip()
-        elif line.startswith("URL"):
-            partes = line.split(":")
-            if len(partes) == 2:
-                url = partes[1].strip()
-                if "linkedin.com" in url:
-                    contato["linkedin"] = url
-                elif "facebook.com" in url:
-                    redes["facebook"] = url
-                elif "skype.com" in url:
-                    redes["skype"] = url
-        elif line.startswith("X-ABDATE") or line.startswith("X-APPLE-DATE"):
-            match_data = re.search(r":(\d{4}-\d{2}-\d{2})", line)
-            match_label = re.search(r"LABEL=([^;:]+)", line)
-            if match_data and match_label:
-                datas.append({
-                    "data": match_data.group(1),
-                    "label": match_label.group(1)
-                })
-
-    if redes:
-        contato["redes"] = redes
-    if datas:
-        contato["datas"] = datas
-
-    return contato if "nome" in contato else None
-
-def buscar_por_nome(termo_nome):
-    multistatus_xml = get_contacts_raw()
-    if isinstance(multistatus_xml, dict) and "erro" in multistatus_xml:
-        return multistatus_xml
-
-    contatos = parse_vcards(multistatus_xml)
-
-    termo = unidecode(termo_nome.strip().lower())
-
-    filtrados = []
-    for c in contatos:
-        if termo in c.get("nome_normalizado", ""):
-            filtrados.append({
-                "nome": c.get("nome"),
-                "email": c.get("email"),
-                "telefone": c.get("telefone"),
-                "empresa": c.get("empresa"),
-                "cargo": c.get("cargo"),
-                "linkedin": c.get("linkedin"),
-                "redes": c.get("redes"),
-                "datas": c.get("datas")
+            contatos.append({
+                "nome": nome.value if nome else None,
+                "nome_normalizado": unidecode(nome.value.lower()) if nome else None,
+                "email": email.value if email else None,
+                "telefone": telefone.value if telefone else None,
+                "empresa": ";".join(org.value) if org else None,
+                "cargo": title.value if title else None,
+                "linkedin": extract_linkedin(note.value) if note else None,
+                "redes": extract_redes(vcard),
+                "datas": extract_datas(vcard),
+                "notas": note.value if note else None,
+                "aniversario": bday.value if bday else None,
+                "enderecos": extract_endereco(vcard)
             })
+        except Exception:
+            continue
 
-    return {"contatos": filtrados}
+    return {"contatos": contatos}
+
+def find_contacts_by_name(termo):
+    raw = get_contacts_raw()
+    if isinstance(raw, dict) and "contatos" not in raw:
+        return raw
+
+    termo_norm = unidecode(termo.lower())
+    resultados = [c for c in raw["contatos"] if termo_norm in (c.get("nome_normalizado") or "")]
+    return {"contatos": resultados}
