@@ -1,15 +1,12 @@
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import FastAPI, Request, HTTPException
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from carddav import get_contacts_raw, buscar_por_nome
-from dotenv import load_dotenv
+from carddav import get_contacts_raw, parse_vcards, buscar_por_nome
 import os
 
-load_dotenv()
-
-API_TOKEN = os.getenv("API_TOKEN")
 app = FastAPI()
 
-# CORS liberado
+# CORS liberado total (ajuste se for necessário restringir)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -18,25 +15,28 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Autenticação por header
-def autenticar(authorization: str = Header(None)):
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Token ausente")
-    token = authorization.replace("Bearer ", "")
-    if token != API_TOKEN:
+API_TOKEN = os.getenv("API_TOKEN", "mellro_super_token_123")
+
+def checar_token(request: Request):
+    auth = request.headers.get("Authorization", "")
+    if not auth.startswith("Bearer ") or auth.split(" ")[1] != API_TOKEN:
         raise HTTPException(status_code=403, detail="Token inválido")
 
 @app.get("/contatos")
-def listar_contatos(authorization: str = Header(None)):
-    autenticar(authorization)
-    raw = get_contacts_raw()
-    if isinstance(raw, dict) and "erro" in raw:
-        return {"erro": raw}
-    contatos = buscar_por_nome("")  # traz todos
-    return {"contatos": contatos}
+async def listar_contatos(request: Request):
+    checar_token(request)
+    try:
+        raw = get_contacts_raw()
+        contatos = parse_vcards(raw)
+        return {"contatos": contatos}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"erro": str(e)})
 
 @app.get("/contato")
-def buscar_contato(nome: str, authorization: str = Header(None)):
-    autenticar(authorization)
-    contatos = buscar_por_nome(nome)
-    return {"contatos": contatos}
+async def contato_por_nome(nome: str, request: Request):
+    checar_token(request)
+    try:
+        resultados = buscar_por_nome(nome)
+        return {"contatos": resultados}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"erro": str(e)})
